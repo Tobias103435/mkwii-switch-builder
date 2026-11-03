@@ -62,12 +62,40 @@ native_render_probe() {
   for t in meson bison flex; do
     command -v "$t" >/dev/null 2>&1 || RENDER_MISS="$RENDER_MISS $t"
   done
-  if command -v python3 >/dev/null 2>&1; then
+  if native_python_setup; then
     python3 -c 'import mako' >/dev/null 2>&1 || RENDER_MISS="$RENDER_MISS mako(python3)"
   else
     RENDER_MISS="$RENDER_MISS python3"
   fi
   [ -z "$RENDER_MISS" ]
+}
+
+# Een `command -v python3` is géén bewijs dat Python er is. Op Windows wijst die
+# naam naar de Store-alias in `%LOCALAPPDATA%\Microsoft\WindowsApps\python.exe`:
+# vanuit bash doet hij alsof hij bestaat, en hij faalt pas met "Python was not
+# found; run without arguments to install from the Microsoft Store". In dit
+# project gebeurde dat midden in de vertaling — vijftien minuten later, exit 49,
+# één regel in de faal. Daarom: dezelfde zoeker als de GUI (échte interpreter,
+# alias onderaan), en daarna een shim in de gereedschapsmap zodat `python` en
+# `python3` in élk dochterproces naar die interpreter wijzen — ook in de
+# upstream-scripts, die de naam letterlijk aanroepen. De PATH van de gastheer
+# wordt niet aangerakt, alleen die van deze procesboom.
+native_python_setup() {
+  local py shim tools_dir n
+  if [ -n "${MKW_PYTHON_OK:-}" ] && [ -x "${MKW_PYTHON_OK}" ]; then return 0; fi
+  tools_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  py="$(bash "$tools_dir/ensure-ui-env.sh" --posix 2>/dev/null)" || return 1
+  [ -n "$py" ] && [ -x "$py" ] || return 1
+  shim="${MKW_PYSHIM_DIR:-${WS:-$tools_dir/..}/.local/pyshim}"
+  mkdir -p "$shim" 2>/dev/null || return 1
+  for n in python python3; do
+    { printf '#!/bin/sh\nexec "%s" "$@"\n' "$py" > "$shim/$n" && chmod 0755 "$shim/$n"; } || return 1
+  done
+  case ":$PATH:" in
+    *":$shim:"*) ;;
+    *) PATH="$shim:$PATH" ;;
+  esac
+  export PATH PYTHON="$py" MKW_PYTHON_OK="$py"
 }
 
 native_probe() {
@@ -111,9 +139,14 @@ native_probe() {
     fi
     miss="$miss $tool"
   done
-  for tool in git cmake ninja python3 dotnet; do
+  for tool in git cmake ninja dotnet; do
     command -v "$tool" >/dev/null 2>&1 || miss="$miss $tool"
   done
+  # python3 staat hier níét bij de andere namen: `command -v` laat de
+  # Store-alias slagen en de bouw valt dan vijftien minuten later. Deze zoeker
+  # draait de interpreter werkelijk en legt een shim neer die `python3` aan die
+  # interpreter koppelt.
+  native_python_setup || miss="$miss python3"
   # portlibs zit op Linux onder portlibs, op Windows/MSYS2 onder portlibs/switch.
   if [ ! -d "$DEVKITPRO/portlibs/switch" ] && [ ! -d "$DEVKITPRO/portlibs" ]; then
     miss="$miss portlibs"

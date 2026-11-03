@@ -9,5 +9,7 @@ tools/nod/
 switch-ops/switch.env
 # Written by MKWii-Builder.cmd/.command: which payload is unpacked here.
 .mkw-payload-stamp
+# The app's own scratch: downloaded toolchain, the python shim it links itself.
+.local/
 __pycache__/
 *.pyc

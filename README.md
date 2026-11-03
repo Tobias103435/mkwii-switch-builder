@@ -21,6 +21,12 @@ folder whose drive does not record file ownership until it is trusted — the bu
 trusts its own folder (and only that one) instead of stopping there. Docker is
 optional — the builder can run devkitA64 natively.
 
+The translation step needs a real Python 3. On Windows the names `python` and
+`python3` often point at the Microsoft Store shortcut instead of an interpreter,
+which fails only when the build is already running; the builder looks up an
+interpreter that actually runs and links those two names to it for its own
+processes, so a shortcut in the PATH is not a reason to install anything.
+
 The dump is **not** in this repository and cannot be: you have to bring your own
 copy of the game. The built `.nro` and the extracted game data are guest code, so
 they are not shareable either — the tooling here is.

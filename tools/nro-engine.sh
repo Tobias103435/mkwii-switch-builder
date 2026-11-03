@@ -438,6 +438,14 @@ if want env; then
     stage env start "checking the native toolchain on this host"
     [ "$NATIVE_OK" = 1 ] || fail "cannot build natively yet: $NATIVE_MISS"
     stage env ok "devkitA64 native: $DEVKITPRO"
+    # De vertaler en de upstream-scripts roepen `python3` bij naam, dus wat die
+    # naam op deze host is, hoort bij de gereedschapsstand. Op Windows kan het de
+    # Store-alias zijn — die doet alsof hij bestaat en faalt dan midden in de
+    # vertaling. native_python_setup heeft allang omgebogen; dit is de regel
+    # waarop een ontvanger kan zien naar wélke interpreter hij wijst.
+    if [ -n "${MKW_PYTHON_OK:-}" ]; then
+      stage env ok "python for the translation: $MKW_PYTHON_OK"
+    fi
     # Een lege deps-map is geen fout, maar wél een mededeling vóór het werk: die
     # eenmalige stack kost uren. Zonder deze regel liep de motor door naar de
     # bouw en brak hij daar af op één ontbrekend commando. deps_is_ready is
@@ -702,6 +710,9 @@ if want build; then
       # nog eens proberen" en iemand die weet dat hij ruimte moet maken.
       if tr -d '\r' < "$raw" | grep -qiE 'no space left on device|not enough space|ENOSPC|disk is full|volume is full'; then
         fail "the disk ran out of space while building — $(( $(free_bytes "$WS") / 1073741824 )) GiB free on $WS now, a full build wants about 10 GiB. Free up room (the Clean up button, or bash tools/sweep-temp.sh, removes the extract and build caches and keeps the toolchain) and start again."
+      fi
+      if tr -d '\r' < "$raw" | grep -qiE 'Python was not found|app execution aliases|install from the Microsoft Store'; then
+        fail "the translation needs Python, and on this PC the name python3 still resolves to the Microsoft Store shortcut instead of an interpreter. The builder normally corrects that inside its own run; if this line appears anyway, install Python 3 once from python.org — or turn the shortcut off: Settings > Apps > Advanced app settings > App execution aliases > python.exe and python3.exe — and start again."
       fi
       fail "build failed via the $BACKEND route (exit code $status). Last lines: $tail"
     }
