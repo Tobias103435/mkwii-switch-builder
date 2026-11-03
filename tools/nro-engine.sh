@@ -650,6 +650,13 @@ if want build; then
     grep '^>> EIND \|^>> TOTAAL ' "$raw" > "$WS/logs/engine-phase-times.txt" 2>/dev/null || true
     [ "$status" = 0 ] || {
       tail=$(tr -d '\r' < "$raw" | tail -n 12 | tr '\n' ' | ' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')
+      # Een bouw die halverwege omvalt omdat de schijf vol raakt, laat in die
+      # laatste regels meestal alleen een afgebroken fase of een schrijffout
+      # achter. De oorzaak wél benoemen is het verschil tussen "wegklikken en
+      # nog eens proberen" en iemand die weet dat hij ruimte moet maken.
+      if tr -d '\r' < "$raw" | grep -qiE 'no space left on device|not enough space|ENOSPC|disk is full|volume is full'; then
+        fail "the disk ran out of space while building — $(( $(free_bytes "$WS") / 1073741824 )) GiB free on $WS now, a full build wants about 10 GiB. Free up room (the Clean up button, or bash tools/sweep-temp.sh, removes the extract and build caches and keeps the toolchain) and start again."
+      fi
       fail "build failed via the $BACKEND route (exit code $status). Last lines: $tail"
     }
     stage build ok "build complete"
