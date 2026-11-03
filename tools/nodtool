@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+# nodtool wrapper: runs nod, the reader of Wii disc images (.rvz .wbfs .iso .gcm).
+#
+# Order of preference:
+#   1. a NATIVE nodtool for this machine: .local/bin/nodtool-<os>-<cpu>, fetched and
+#      SHA-256 verified by tools/get-nodtool.sh. No Docker, no admin rights, and it
+#      reads a dump that sits outside this folder.
+#   2. the Linux binary (tools/nod/bin/nodtool) inside Docker - the older route, kept
+#      as a fallback for a machine that already has it and cannot reach github.
+#   3. if neither is there, fetch (1) once and use it; MKW_NO_DOWNLOAD=1 forbids that.
+#
+# Usage: tools/nodtool <info|extract|list|convert|verify|dat> [args...]
+#   bash tools/nodtool info "Mario Kart Wii (PAL).rvz"
+#   NODTOOL_WORKSPACE="D:/iso" bash tools/nodtool extract a.iso out   # docker route only
+#
+# The docker route bind-mounts $NODTOOL_WORKSPACE (default: the project workspace) as
+# /work, so disc images and output directories must live under that root; the current
+# Git Bash directory is mapped too, so relative paths behave as expected there.
+#
+# Rebuild recipe for the Linux binary (clean clone at tools/nod; needs git for build.rs):
+#   MSYS_NO_PATHCONV=1 docker run --rm \
+#     -v "<workspace>/tools:/work:rw" \
+#     -v nodcargo:/var/nod-target -w /work/nod -e CARGO_TARGET_DIR=/var/nod-target \
+#     rust:1-slim bash -c 'export PATH=/usr/local/cargo/bin:/usr/bin:$PATH
+#       apt-get update -qq
+#       apt-get install -y -qq build-essential pkg-config git ca-certificates
+#       cargo build --release --locked -p nodtool
+#       mkdir -p /work/nod/bin && cp /var/nod-target/release/nodtool /work/nod/bin/nodtool'
+set -euo pipefail
+
+self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WS="${NODTOOL_WORKSPACE:-$(cd "$self_dir/.." && pwd)}"
+
+looks_like_path() {
+	local a="$1"
+	case "$a" in
+	-*) return 1 ;;
+	. | .. | ./* | ../* | /* | [A-Za-z]:/* | [A-Za-z]:\\*) return 0 ;;
+	esac
+	[[ -e "$a" ]]
+}
+
+# ---- the native binary, if this folder has one --------------------------------
+uname_s="$(uname -s)"
+NATIVE_OS=""
+case "$uname_s" in
+	Linux) NATIVE_OS=linux ;;
+	Darwin) NATIVE_OS=macos ;;
+	MINGW*|MSYS*|CYGWIN*) NATIVE_OS=windows ;;
+esac
+NATIVE_ARCH=""
+case "$(uname -m)" in
+	x86_64 | amd64) NATIVE_ARCH=x86_64 ;;
+	arm64) NATIVE_ARCH=arm64 ;;
+	aarch64) [ "$NATIVE_OS" = windows ] && NATIVE_ARCH=arm64 || NATIVE_ARCH=aarch64 ;;
+esac
+
+native_bin=""
+if [ -n "$NATIVE_OS" ]; then
+	cand="$WS/.local/bin/nodtool-$NATIVE_OS-$NATIVE_ARCH"
+	if [ "$NATIVE_OS" = windows ]; then cand="$cand.exe"; fi
+	if [ -f "$cand" ]; then native_bin="$cand"; fi
+fi
+
+run_native() {
+	args=()
+	for arg in "$@"; do
+		if looks_like_path "$arg"; then
+			# A Windows nodtool is a Win32 program: it needs C:\ paths, and Git Bash
+			# hands them over untranslated, so say it in the form it understands.
+			case "$uname_s" in
+				MINGW* | MSYS* | CYGWIN*) arg="$(cygpath -aw "$arg")" ;;
+			esac
+		fi
+		args+=("$arg")
+	done
+	[ -x "$native_bin" ] || chmod +x "$native_bin" 2>/dev/null || true
+	exec "$native_bin" "${args[@]}"
+}
+
+if [ -n "$native_bin" ]; then run_native "$@"; fi
+
+# ---- nothing fetched yet: get the native one, unless downloads are forbidden --
+if [ "${MKW_NO_DOWNLOAD:-0}" != 1 ] && [ -n "$NATIVE_OS" ]; then
+	echo "nodtool: no native copy here yet, fetching it (SHA-256 verified) into .local/bin" >&2
+	bash "$self_dir/get-nodtool.sh" >&2 || true
+	cand="$WS/.local/bin/nodtool-$NATIVE_OS-$NATIVE_ARCH"
+	if [ "$NATIVE_OS" = windows ]; then cand="$cand.exe"; fi
+	if [ -f "$cand" ]; then
+		native_bin="$cand"
+		run_native "$@"
+	fi
+	echo "nodtool: the native fetch did not produce a binary; trying the Docker route" >&2
+fi
+
+# ---- Docker fallback ----------------------------------------------------------
+export MSYS_NO_PATHCONV=1
+
+IMAGE="${NODTOOL_IMAGE:-devkitpro/devkita64}"
+BIN_IN_MOUNT="/nodtool-bin/nodtool"
+
+BIN_HOST="$self_dir/nod/bin/nodtool"
+if [[ ! -f "$BIN_HOST" ]]; then
+	>&2 echo "nodtool: no native binary and no Linux one at $BIN_HOST."
+	>&2 echo "Fetch the native one with: bash tools/get-nodtool.sh"
+	exit 1
+fi
+BIN_HOST_WIN="$(cygpath -aw "$BIN_HOST")"
+BIN_HOST_WIN="${BIN_HOST_WIN//\\//}"
+# Docker Desktop on Windows cannot bind-mount a single file, so mount its directory.
+BIN_DIR_WIN="${BIN_HOST_WIN%/*}"
+
+if ! docker_bin_path="$(cygpath -aw "$WS")"; then
+	>&2 echo "Cannot resolve workspace path: $WS"
+	exit 1
+fi
+docker_bin_path="${docker_bin_path//\\//}"
+# Strip a trailing backslash so prefix matching works for both "C:/ws" and "C:/ws/".
+docker_bin_path="${docker_bin_path%/}"
+WORKSPACE="$docker_bin_path"
+
+# Map the current Git Bash directory to a container path under /work.
+cwd_win="$(cygpath -aw .)"
+cwd_win="${cwd_win//\\//}"
+if [[ "$cwd_win" == "$WORKSPACE" ]]; then
+	container_cwd="/work"
+elif [[ "$cwd_win" == "$WORKSPACE"/* ]]; then
+	container_cwd="/work${cwd_win#"$WORKSPACE"}"
+else
+	>&2 echo "Current directory '$cwd_win' is outside the mounted workspace '$WORKSPACE'."
+	>&2 echo "cd into the workspace, or set NODTOOL_WORKSPACE to a directory containing your paths."
+	exit 1
+fi
+
+args=()
+for arg in "$@"; do
+	if looks_like_path "$arg"; then
+		win="$(cygpath -aw "$arg")"
+		win="${win//\\//}"
+		if [[ "$win" == "$WORKSPACE" ]]; then
+			args+=("/work")
+		elif [[ "$win" == "$WORKSPACE"/* ]]; then
+			args+=("/work${win#"$WORKSPACE"}")
+		else
+			>&2 echo "Path '$arg' resolves to '$win', outside the mounted workspace '$WORKSPACE'."
+			>&2 echo "Move it under the workspace, or set NODTOOL_WORKSPACE."
+			exit 1
+		fi
+	else
+		args+=("$arg")
+	fi
+done
+
+docker run --rm \
+	-v "$WORKSPACE:/work:rw" \
+	-v "$BIN_DIR_WIN:/nodtool-bin:ro" \
+	-w "$container_cwd" \
+	"$IMAGE" \
+	/usr/bin/env bash -c 'export PATH=/usr/bin:/bin:$PATH
+	exec "$@"' -- "$BIN_IN_MOUNT" "${args[@]}"

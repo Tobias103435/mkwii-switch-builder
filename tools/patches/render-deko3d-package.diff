@@ -1,0 +1,180 @@
+diff --git a/scripts/build-local-native-deko3d.sh b/scripts/build-local-native-deko3d.sh
+index 7775a00..bc6d8f1 100755
+--- a/scripts/build-local-native-deko3d.sh
++++ b/scripts/build-local-native-deko3d.sh
+@@ -96,6 +96,26 @@ if [[ "$(git -C "$REF_DIR" rev-parse HEAD)" != "$REF_PIN" ]]; then
+     echo "error: DriftDroid reference pin mismatch" >&2
+     exit 3
+ fi
++if [[ ! -f "$DAWN_PATCH" || ! -f "$AURORA_ABSEIL_PATCH" || ! -f "$DAWN_ABSEIL_PATCHER" || ! -f "$DAWN_SWITCH_PATCHER" ]]; then
++    echo "error: pinned Switch dependency patches/helpers are missing" >&2
++    exit 3
++fi
++
++# A render-stack package (tools/render-deps.sh) carries the compiled archives and
++# the headers the link needs, not the 3.4 GiB Dawn checkout that the worktree
++# audits below inspect. Provenance then comes from the package's own receipt
++# instead: its archive, patch and patcher hashes are recomputed here against this
++# repository's pinned files, so the same guarantee holds on bytes rather than on
++# a git worktree. Editing any Switch patch invalidates the package exactly as it
++# invalidates a locally built tree.
++if [[ -f "$DEPS_DIR/.mkw-render-package" ]]; then
++    RENDER_PACKAGE=1
++else
++    RENDER_PACKAGE=0
++fi
++readonly RENDER_PACKAGE
++
++if [[ "$RENDER_PACKAGE" == 0 ]]; then
+ if [[ ! -d "$DAWN_SOURCE_DIR/.git" ]]; then
+     echo "error: attributed Switch Dawn checkout not found: $DAWN_SOURCE_DIR" >&2
+     exit 3
+@@ -105,10 +125,6 @@ if [[ "$actual_dawn_head" != "$DAWN_BASE_PIN" ]]; then
+     echo "error: Dawn base mismatch: expected $DAWN_BASE_PIN, got $actual_dawn_head" >&2
+     exit 3
+ fi
+-if [[ ! -f "$DAWN_PATCH" || ! -f "$AURORA_ABSEIL_PATCH" || ! -f "$DAWN_ABSEIL_PATCHER" || ! -f "$DAWN_SWITCH_PATCHER" ]]; then
+-    echo "error: pinned Switch dependency patches/helpers are missing" >&2
+-    exit 3
+-fi
+ if ! python3 "$DAWN_SWITCH_PATCHER" "$DAWN_SOURCE_DIR" --verify-base-patch "$DAWN_PATCH"; then
+     echo "error: pinned DriftDroid Switch/Deko3D patch is not exactly applied to Dawn" >&2
+     exit 3
+@@ -164,6 +180,7 @@ while IFS= read -r line; do
+         fi
+     fi
+ done <<< "$dawn_submodule_status"
++fi
+ 
+ # The separate DriftDroid Abseil patch is intentionally NOT applied to Dawn's
+ # own Abseil submodule. Its relevant Switch portability hunks are mirrored by
+@@ -172,6 +189,15 @@ if [[ ! -f "$DAWN_ARCHIVE" ]]; then
+     echo "error: native Deko3D Dawn archive not found: $DAWN_ARCHIVE" >&2
+     exit 3
+ fi
++# The package has to carry the headers the Switch CMake import puts on its
++# interface; a package without them would only surface as a confusing compile
++# error several minutes into the build.
++if [[ ! -f "$DAWN_SOURCE_DIR/include/dawn/native/DawnNative.h" ||
++      ! -f "$DAWN_BUILD_DIR/gen/include/dawn/webgpu.h" ]]; then
++    echo "error: Dawn headers for the Switch import are missing ($DAWN_SOURCE_DIR/include, $DAWN_BUILD_DIR/gen/include)" >&2
++    exit 3
++fi
++if [[ "$RENDER_PACKAGE" == 0 ]]; then
+ if [[ ! -d "$UAM_ROOT/.git" ]]; then
+     echo "error: attributed libuam checkout not found: $UAM_ROOT" >&2
+     exit 3
+@@ -181,6 +207,7 @@ if [[ "$uam_head" != "$UAM_PIN" ]]; then
+     echo "error: libuam pin mismatch: expected $UAM_PIN, got $uam_head" >&2
+     exit 3
+ fi
++fi
+ if [[ ! -f "$UAM_LIB" ]]; then
+     echo "error: pinned libuam static library not found: $UAM_LIB" >&2
+     exit 3
+@@ -190,6 +217,7 @@ if [[ ! -f "$DEP_RECEIPT" ]]; then
+     exit 3
+ fi
+ 
++if [[ "$RENDER_PACKAGE" == 0 ]]; then
+ uam_diff_sha256="$(git -C "$UAM_ROOT" diff HEAD --binary | sha256sum | awk '{print $1}')"
+ dawn_diff_sha256="$(git -C "$DAWN_SOURCE_DIR" diff HEAD --binary -- . ':(exclude)third_party/abseil-cpp' | sha256sum | awk '{print $1}')"
+ dawn_abseil_diff_sha256="$(git -C "$DAWN_ABSEIL_DIR" diff HEAD --binary | sha256sum | awk '{print $1}')"
+@@ -230,6 +258,81 @@ try:
+ except (OSError, ValueError) as error:
+     raise SystemExit(f"error: dependency provenance invalid; rebuild dependencies: {error}")
+ PY
++else
++    python3 - "$DEP_RECEIPT" "$DAWN_ARCHIVE" "$UAM_LIB" "$DAWN_PATCH" "$AURORA_ABSEIL_PATCH" \
++        "$DAWN_SWITCH_PATCHER" "$DAWN_ABSEIL_PATCHER" \
++        "driftdroid_reference=$REF_PIN" \
++        "dawn_base_commit=$DAWN_BASE_PIN" \
++        "dawn_abseil_commit=$DAWN_ABSEIL_PIN" \
++        "uam_commit=$UAM_PIN" \
++        "dawn_tint_build_wgsl_reader=ON" \
++        "dawn_tint_build_wgsl_writer=ON" \
++        "dawn_tint_build_glsl_writer=ON" \
++        "dawn_tint_build_glsl_validator=OFF" \
++        "dawn_tint_build_spv_reader=OFF" \
++        "dawn_tint_build_spv_writer=OFF" \
++        "dawn_tint_build_hlsl_writer=OFF" \
++        "dawn_tint_build_msl_writer=OFF" \
++        "dawn_tint_build_null_writer=OFF" <<'PY'
++from pathlib import Path
++import hashlib
++import sys
++
++# argv: receipt, Dawn archive, libuam, Dawn patch, Aurora Abseil patch,
++# Dawn Switch patcher, Abseil Switch patcher, then key=value expectations.
++HASHED = {
++    "dawn_archive_sha256": 2,
++    "uam_archive_sha256": 3,
++    "dawn_patch_sha256": 4,
++    "aurora_abseil_patch_sha256": 5,
++    "dawn_switch_patcher_sha256": 6,
++    "dawn_abseil_patcher_sha256": 7,
++}
++
++def digest(path):
++    state = hashlib.sha256()
++    with open(path, "rb") as handle:
++        for block in iter(lambda: handle.read(1 << 20), b""):
++            state.update(block)
++    return state.hexdigest()
++
++try:
++    entries = {}
++    for line in Path(sys.argv[1]).read_text().splitlines():
++        key, value = line.split("=", 1)
++        if key in entries:
++            raise ValueError(f"duplicate field: {key}")
++        entries[key] = value
++    for field in sys.argv[8:]:
++        key, expected = field.split("=", 1)
++        if entries.get(key) != expected:
++            raise ValueError(f"{key} differs from the pinned value")
++    for key, index in HASHED.items():
++        if entries.get(key) != digest(sys.argv[index]):
++            raise ValueError(f"{key} differs from the bytes this package ships")
++except (OSError, ValueError) as error:
++    raise SystemExit(f"error: render-stack package provenance invalid: {error}")
++
++# The worktree-diff, cache and tool-version fields describe the machine that
++# packed this archive. They are reported, not reproduced: the hashes above tie
++# these bytes to the same pins and the same Switch patches.
++recorded = [key for key in ("dawn_worktree_diff_sha256", "dawn_abseil_diff_sha256",
++                            "dawn_cmake_cache_sha256", "uam_worktree_diff_sha256",
++                            "compiler", "cmake", "ninja", "meson", "devkitpro")
++            if key in entries]
++print("==> Render-stack package verified: shipped bytes match this repository's pins and patches")
++print(f"    recorded on the packing host: {', '.join(recorded)}")
++PY
++    actual_dawn_head="$DAWN_BASE_PIN"
++    actual_dawn_abseil_head="$DAWN_ABSEIL_PIN"
++    uam_head="$UAM_PIN"
++    # These three describe the worktrees of the machine that built this package;
++    # they are carried over from its receipt, because this machine has no source
++    # trees to re-derive them from. The byte-level provenance above is re-computed.
++    dawn_diff_sha256="$(awk -F= '$1=="dawn_worktree_diff_sha256"{print $2}' "$DEP_RECEIPT")"
++    dawn_abseil_diff_sha256="$(awk -F= '$1=="dawn_abseil_diff_sha256"{print $2}' "$DEP_RECEIPT")"
++    uam_diff_sha256="$(awk -F= '$1=="uam_worktree_diff_sha256"{print $2}' "$DEP_RECEIPT")"
++fi
+ 
+ mkdir -p "$BUILD_DIR" "$OUTPUT_DIR"
+ 
+@@ -251,6 +354,7 @@ configure=(
+ cat <<EOF_CONFIG
+ ==> Configuring optimized Switch product
+     backend       : Dawn/WebGPU -> native Deko3D
++    render stack  : $([[ "$RENDER_PACKAGE" == 1 ]] && echo "prebuilt package ($DAWN_BUILD_DIR)" || echo "built from the audited source tree")
+     Dawn base     : $actual_dawn_head
+     Dawn Abseil   : $actual_dawn_abseil_head + audited libnx delta
+     UAM pin       : $uam_head
+@@ -331,6 +435,7 @@ fi
+ 
+ {
+     echo "driftdroid_reference=$REF_PIN"
++    echo "render_stack_mode=$([[ "$RENDER_PACKAGE" == 1 ]] && echo package || echo source)"
+     echo "dawn_release=v20260603.191052"
+     echo "dawn_base_commit=$actual_dawn_head"
+     echo "dawn_patch_sha256=$(sha256sum "$DAWN_PATCH" | awk '{print $1}')"

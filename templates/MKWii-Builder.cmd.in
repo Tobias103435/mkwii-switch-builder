@@ -1,0 +1,310 @@
+@echo off
+rem MKWii-Builder.cmd - one file that is the whole builder.
+rem
+rem Put this single file in any folder and double-click it. On the first run it
+rem unpacks its own tooling into that same folder (tools\, README-Switch-Port.md,
+rem Project log), then opens the window: pick your ROM, press Start, get a native
+rem Switch .nro plus a drag-and-drop SD folder. Nothing is installed on the machine,
+rem nothing leaves it, and your dump is never moved or deleted.
+rem
+rem Needs: Windows 10 or 11, Git for Windows (this file offers to install it when it
+rem is missing - it is what brings bash), your own PAL RMCP01 dump (.rvz .wbfs .iso
+rem .gcm), and about 8 GiB of free space in this folder.
+rem
+rem This is the Windows twin: MKWii-Builder.command is the same single file for
+rem macOS and Linux. Double-clicking a .cmd on a Mac opens it in a text editor,
+rem so hand that one to Mac and Linux people instead.
+rem
+rem Options:  MKWii-Builder.cmd --full  --zip  --plan  --help  --no-map
+rem           --clean removes the throw-away build files, --clean-all removes
+rem           everything this folder got except your own dump and this file.
+rem Keep this window open while it builds; the progress is also in the browser tab.
+setlocal EnableExtensions
+chcp 65001 >nul
+set "ROOT=%~dp0"
+cd /d "%ROOT%"
+set "PS1=__PS1__"
+
+echo.
+echo ==========================================================
+echo  Mario Kart Wii - native Switch builder (one file)
+echo ==========================================================
+echo.
+echo  folder:      %ROOT%
+echo.
+
+set "BASH="
+call :findbash
+if not defined BASH goto git_missing
+if "%MKW_GIT_INSTALLED%"=="1" echo  (reopened on the Git that was just installed)
+echo tooling bash: %BASH%
+goto after_bash
+
+rem Kept out of one big if-block on purpose: cmd expands %ANS% when it parses a
+rem block, so a prompt and the answer test inside the same parentheses can never
+rem see each other. Labels and a straight line do.
+:git_missing
+echo.
+echo  This builder runs on bash: the engine, the translator and the packing are
+echo  shell scripts, and bash is what Git for Windows brings along. Nothing is
+echo  installed without asking, nothing leaves this machine and your dump is never
+echo  moved.
+echo.
+set "ANS="
+if defined MKW_NOPAUSE set "ANS=N"
+if not defined MKW_NOPAUSE set /p ANS=Install Git for Windows now? One time, about a minute. [y/N]:
+if /i not "%ANS%"=="y" goto git_refused
+
+set "DONE="
+where winget >nul 2>nul && set "DONE=winget"
+if defined DONE goto git_install
+where choco >nul 2>nul && set "DONE=choco"
+if defined DONE goto git_install
+echo.
+echo  Neither winget nor choco is on this machine, so there is no installer this
+echo  window can drive. The download page is opening in your browser: pick
+echo  "Git for Windows", install it, then double-click this file again.
+start "" https://gitforwindows.org/
+goto git_refused
+
+:git_install
+echo.
+echo  Installing with %DONE% - a Windows prompt may ask you to confirm.
+if not "%DONE%"=="winget" goto git_choco
+winget install -e --id Git.Git --scope user --accept-source-agreements --accept-package-agreements --silent
+if errorlevel 1 winget install -e --id Git.Git --accept-source-agreements --accept-package-agreements --silent
+goto git_installed
+
+:git_choco
+choco install git -y --no-progress
+
+:git_installed
+rem A fresh install is not in this window's PATH, but the hunt looks at the folders
+rem where the installer really puts it, so it is found without reloading anything.
+call :findbash
+if defined BASH goto git_reopen
+echo.
+echo  The installer ran, but no bash.exe turned up where it should be. Close this
+echo  window and double-click the file again - a new window sees a new install.
+goto git_refused
+
+:git_reopen
+echo.
+echo  Git is in place: %BASH%
+echo  Reopening this file so it runs on it...
+set "MKW_GIT_INSTALLED=1"
+"%~f0" %*
+set "RC=%ERRORLEVEL%"
+if defined MKW_NOPAUSE exit /b %RC%
+pause
+exit /b %RC%
+
+rem The window looks for bash itself, but it must not fall for the WSL relay that
+rem cmd's PATH points at: hand over the Git Bash that was just verified here.
+set "MKW_BASH=%BASH%"
+goto after_bash
+
+:git_refused
+echo.
+echo  Without bash nothing can be built. Two ways on:
+echo    1. install Git for Windows   https://git-scm.com/download/win
+echo       then double-click this file again;
+echo    2. or run the engine from any bash you already have:
+echo       bash tools/build-nro.sh
+if not defined MKW_NOPAUSE pause
+exit /b 1
+
+:after_bash
+
+rem ---- step 1: this file carries its own tooling; unpack it once --------------
+if exist "tools\nro-engine.sh" goto have_tools
+echo.
+echo  first run: unpacking the builder into this folder
+rem -EncodedCommand takes no extra arguments, so the paths travel by environment.
+set "MKW_SRC=%~f0"
+set "MKW_ROOT=%ROOT%"
+set "MKW_MARK=__PAYLOAD_NAME__"
+powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand %PS1%
+if not exist "tools\nro-engine.sh" (
+  echo.
+  echo Error: unpacking did not produce tools\nro-engine.sh. PowerShell is needed for
+  echo this first step ^(it is part of Windows^). Details are above.
+  if not defined MKW_NOPAUSE pause
+  exit /b 1
+)
+echo  tools in place: %ROOT%tools\
+echo.
+echo  reopening now that the tooling is here...
+set "MKW_UNPACKED=1"
+call "%~f0" %*
+set "RC=%ERRORLEVEL%"
+if defined MKW_NOPAUSE exit /b %RC%
+pause
+exit /b %RC%
+
+:have_tools
+set "FINDER=%ROOT%tools\ensure-ui-env.sh"
+
+rem The toolchain is fetched into this folder, so the whole thing stays portable,
+rem unless this machine already has one at the usual spot - then use that.
+if not exist "%USERPROFILE%\mkw-toolchain\opt\devkitpro" if not exist ".local\mkw-toolchain\opt\devkitpro" (
+  set "MKW_TOOLCHAIN_PREFIX=%ROOT%.local\mkw-toolchain"
+)
+
+if "%MKW_UNPACKED%"=="1" echo  (reopened after unpacking the tooling)
+
+if "%~1"=="--help" (
+  "%BASH%" tools/nro-engine.sh --help
+  echo.
+  echo Extra options for the window: --no-browser --port 8765 --dump path
+  if not defined MKW_NOPAUSE pause
+  exit /b 0
+)
+
+set "PYCMD="
+call :findpython
+if defined PYCMD echo interface:    %PYCMD%
+
+rem --plan and --stage are read-only answers, they do not need a window.
+if "%~1"=="--plan" set "MKW_PLAN=1"
+if "%~1"=="--plan" goto terminal
+if "%~1"=="--stage" goto terminal
+
+rem Cleaning up works from the terminal too; the window has the same two sizes.
+if "%~1"=="--clean" goto clean_leftovers
+if "%~1"=="--clean-all" goto clean_everything
+
+if defined PYCMD (
+  if not defined MKW_RELANCHED if defined MKW_PY_INSTALLED (
+    rem A fresh Python install only shows up in a new process: reopen ourselves once.
+    set "MKW_RELANCHED=1"
+    echo.
+    echo  Python is installed - reopening this file so it is seen.
+    "%~f0" %*
+    set "RC=%ERRORLEVEL%"
+    if defined MKW_NOPAUSE exit /b %RC%
+    pause
+    exit /b %RC%
+  )
+  goto window
+)
+
+echo.
+echo  The window - pick a ROM, press Start, watch the progress - runs on Python 3,
+echo  and this machine has no reachable one.
+call "%BASH%" "%FINDER%" --reason
+echo.
+set "ANS="
+if defined MKW_NOPAUSE (
+  set "ANS=N"
+) else (
+  set /p ANS=Install Python 3 now and open the window? [y/N]:
+)
+if /i not "%ANS%"=="y" goto terminal
+call "%BASH%" "%FINDER%" --install
+set "MKW_PY_INSTALLED=1"
+set "PYCMD="
+call :findpython
+if not defined PYCMD (
+  echo.
+  echo  Python 3 is still not reachable, so the build continues right here in this
+  echo  window. It asks for your dump path and then builds; same engine, same result.
+)
+
+:terminal
+echo.
+echo entry point: %ROOT%tools\build-nro.sh
+echo  (Terminal mode: it asks for the dump path, then builds. Same engine, no window.)
+echo.
+"%BASH%" tools/build-nro.sh %*
+goto done
+
+:window
+echo entry point: %ROOT%tools\nro-webui.py
+echo.
+echo  A window opens in your browser. There: pick a ROM, Start, progress.
+echo  (No browser? "%PYCMD%" tools\nro-webui.py --no-browser prints the address.)
+echo  Keep this terminal window open while it builds.
+echo.
+"%PYCMD%" tools\nro-webui.py %*
+goto done
+
+:clean_leftovers
+echo.
+echo  Removing the throw-away parts: object files, translated shards, the extracted
+echo  game data. The .nro, the SD folder and the toolchain stay.
+echo.
+"%BASH%" tools/clean-app.sh --leftovers
+set "RC=%ERRORLEVEL%"
+if not defined MKW_NOPAUSE pause
+exit /b %RC%
+
+:clean_everything
+echo.
+echo  This removes everything this app made in this folder: the .nro, the drag-and-drop
+echo  SD folder, the source clone, the toolchain and the tooling it unpacked.
+echo  Your own dump and anything else that was already here stay.
+if defined MKW_NOPAUSE goto clean_go
+echo.
+set "ANS="
+set /p ANS=Remove it all? [y/N]:
+if /i not "%ANS%"=="y" (
+  echo  Nothing was removed.
+  if not defined MKW_NOPAUSE pause
+  exit /b 1
+)
+:clean_go
+"%BASH%" tools/clean-app.sh --everything --yes
+set "RC=%ERRORLEVEL%"
+rem The tooling sits in tools\ and bash cannot remove the folder it runs from.
+if exist "tools" rmdir /s /q "tools"
+echo.
+echo  This folder holds only MKWii-Builder.cmd again, plus your own files.
+echo  Double-click that file whenever you want to build again.
+if not defined MKW_NOPAUSE pause
+exit /b %RC%
+
+:done
+set "RC=%ERRORLEVEL%"
+echo.
+if defined MKW_PLAN (
+  echo That was the plan only - nothing was built. Double-click again and press Start.
+) else if "%RC%"=="0" (
+  echo DONE.
+  echo    drag-and-drop SD folder: dist\MarioKartWii-Switch\   ^(the switch/ folder goes at the root of your SD^)
+  echo    the .nro itself:         WiiCompiled-Switch\local-product\native-deko3d\
+  echo The .sha256 file for checking is there too.
+) else (
+  echo FAILED, exit code %RC%. The full build log is in the logs\ folder.
+)
+echo.
+echo  The .nro contains recompiled Nintendo code: personal use only, do not publish it.
+echo  To undo what this folder got: the window has a Clean up card, or run this file
+echo  with --clean (throw-away parts) or --clean-all (everything it made).
+echo.
+if not defined MKW_NOPAUSE pause
+exit /b %RC%
+
+rem One line on stdout = the interpreter this machine can really run (see finder).
+rem The word `call` is needed: without it cmd strips the first quote of the
+rem command line and bash.exe becomes 'C:\Program' - not a command.
+:findpython
+for /f "delims=" %%i in ('call "%BASH%" "%FINDER%" 2^>nul') do if not defined PYCMD set "PYCMD=%%i"
+goto :eof
+
+rem The installers' own folders come first and PATH only afterwards: cmd's PATH
+rem often points at the WSL bash relay, which is not the bash this engine wants.
+rem A user-scope Git lands in %LOCALAPPDATA%\Programs\Git, a machine one in
+rem C:\Program Files\Git - both are covered, so a fresh install is found without
+rem reloading this window's PATH.
+:findbash
+if exist "C:\Program Files\Git\bin\bash.exe" set "BASH=C:\Program Files\Git\bin\bash.exe"
+if not defined BASH if exist "C:\Program Files\Git1\bin\bash.exe" set "BASH=C:\Program Files\Git1\bin\bash.exe"
+if not defined BASH if exist "%LOCALAPPDATA%\Programs\Git\bin\bash.exe" set "BASH=%LOCALAPPDATA%\Programs\Git\bin\bash.exe"
+if not defined BASH for /f "delims=" %%i in ('where bash.exe 2^>nul') do if not defined BASH set "BASH=%%i"
+goto :eof
+
+rem ==== __PAYLOAD_NAME__ ====
+__PAYLOAD__
+rem ==== __PAYLOAD_NAME__-END ====
+exit /b 0

@@ -1,0 +1,11 @@
+# Everything a real run writes next to this tooling stays out of git:
+# it is either Nintendo material or machine-local.
+dist/
+.deps/
+WiiCompiled-Switch/
+discs/
+logs/
+tools/nod/
+switch-ops/switch.env
+__pycache__/
+*.pyc

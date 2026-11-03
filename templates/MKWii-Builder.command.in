@@ -1,0 +1,310 @@
+#!/bin/sh
+# MKWii-Builder.command - one file that is the whole builder (macOS and Linux).
+#
+# Put this single file in any folder and double-click it: macOS opens a Terminal
+# window, Linux does the same when you allow "run in terminal" (or start it with
+# `sh MKWii-Builder.command`). On the first run it unpacks its own tooling into
+# that same folder (tools/, README-Switch-Port.md, the project log), then opens
+# the window: pick your ROM, press Start, get a native Switch .nro plus a
+# drag-and-drop SD folder. Nothing is installed on the machine, nothing leaves
+# it, and your dump is never moved or deleted.
+#
+# Needs: macOS 12+ or a Linux distro with bash 3.2+ (both already installed), git
+# (this file offers to install it when it is missing), your own PAL RMCP01 dump
+# (.rvz .wbfs .iso .gcm), and about 8 GiB of free space in this folder.
+#
+# Options:  sh MKWii-Builder.command --full  --zip  --plan  --help  --no-map
+#           --clean removes the throw-away build files, --clean-all removes
+#           everything this folder got except your own dump and this file.
+# Keep this window open while it builds; the progress is also in the browser tab.
+set -u
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || exit 1
+SELF="$ROOT/$(basename -- "$0")"
+MARK="__PAYLOAD_NAME__"
+PKG="WiiCompiled-Switch-builder"
+
+echo
+echo "=========================================================="
+echo " Mario Kart Wii - native Switch builder (one file)"
+echo "=========================================================="
+echo
+echo " folder:      $ROOT"
+
+# bash is what the engine runs on. Like the window does with Python and like the
+# Windows entry does with Git Bash: a candidate only counts once it really ran.
+BASH=""
+for cand in "${MKW_BASH:-}" /bin/bash /usr/bin/bash "$(command -v bash 2>/dev/null || true)"; do
+  [ -n "$cand" ] || continue
+  [ -f "$cand" ] || continue
+  if [ "$("$cand" -c 'printf mkwok' 2>/dev/null || true)" = "mkwok" ]; then
+    BASH="$cand"
+    break
+  fi
+done
+if [ -z "$BASH" ]; then
+  echo
+  echo "Error: no working bash found. This builder runs on bash - on macOS it is"
+  echo "already there (/bin/bash); on Linux install your distro's bash package."
+  [ -t 0 ] && read -r _ans
+  exit 1
+fi
+echo " tooling bash: $BASH"
+export MKW_BASH="$BASH"
+
+# ---- git: the engine clones the source with it and reads the pins from it -----
+OSNAME=$(uname -s 2>/dev/null || echo unknown)
+case "$OSNAME" in
+  *Darwin*) OSNAME=macos ;;
+  *)        OSNAME=linux ;;
+esac
+
+# A clean Mac ships /usr/bin/git as a shim that only works once the command line
+# tools are installed, and running that shim is what pops Apple's dialog. Asking
+# xcode-select reads the same state without touching it, so nothing is offered to
+# the user that they have already been asked about.
+has_git() {
+  command -v git >/dev/null 2>&1 || return 1
+  if [ "$OSNAME" = macos ]; then
+    xcode-select -p >/dev/null 2>&1 || return 1
+  fi
+  git --version >/dev/null 2>&1
+}
+
+install_git() {
+  if [ "$OSNAME" = macos ]; then
+    if ! xcode-select -p >/dev/null 2>&1; then
+      echo
+      echo " Starting Apple's own installer: the command line tools hold git."
+      echo " It opens a window of its own and takes a few minutes - when it reports"
+      echo " Done, come back here and press Enter."
+      xcode-select --install
+      [ -t 0 ] && { printf 'Press Enter when the installer is done: '; read -r _ans; }
+      return 0
+    fi
+    if command -v brew >/dev/null 2>&1; then
+      brew install git
+      return $?
+    fi
+    echo " git is missing but the tools selector is set, which is unusual."
+    echo " Install with brew (https://brew.sh):  brew install git"
+    return 1
+  fi
+  if command -v apt-get >/dev/null 2>&1; then sudo apt-get update -qq && sudo apt-get install -y git
+  elif command -v dnf >/dev/null 2>&1; then sudo dnf install -y git
+  elif command -v pacman >/dev/null 2>&1; then sudo pacman -Sy --noconfirm git
+  elif command -v zypper >/dev/null 2>&1; then sudo zypper -n install git
+  else
+    echo " No known package manager here, so git needs your distro's own way."
+    return 1
+  fi
+}
+
+if ! has_git; then
+  echo
+  echo " This builder also needs git: it clones the source into this folder and checks"
+  echo " which commit every part of it must be at. Nothing is installed without asking,"
+  echo " nothing leaves this machine and your dump is never moved."
+  echo
+  WANTGIT=""
+  if [ -t 0 ]; then
+    printf 'Install git now? One time, a few minutes. [y/N] '
+    read -r ans
+    case "$ans" in [yY]|[yY][eE][sS]) WANTGIT=1 ;; esac
+  else
+    echo " (no terminal to ask in, so nothing was installed)"
+  fi
+  if [ -n "$WANTGIT" ]; then
+    install_git
+    if has_git; then :; else echo " The installer ran, but git still does not work."; fi
+  fi
+  if ! has_git; then
+    echo
+    echo " Without git nothing can be built. Two ways on:"
+    if [ "$OSNAME" = macos ]; then
+      echo "   1. run  xcode-select --install   (Apple's command line tools, a few minutes)"
+      echo "      or  brew install git          (https://brew.sh)"
+    else
+      echo "   1. install git with your distro's package manager:"
+      echo "        apt:  sudo apt-get install git     dnf:  sudo dnf install git"
+      echo "        pacman: sudo pacman -S git         zypper: sudo zypper install git"
+    fi
+    echo "   2. or run the engine from a checkout you already have:"
+    echo "        sh tools/build-nro.sh"
+    echo " Then open this file again."
+    [ -t 0 ] && read -r _ans
+    exit 1
+  fi
+  echo " git is in place: $(git --version 2>/dev/null)"
+fi
+
+# ---- step 1: this file carries its own tooling; unpack it once ----------------
+if [ ! -f "$ROOT/tools/nro-engine.sh" ]; then
+  echo
+  echo " first run: unpacking the builder into this folder"
+  TMPD=$(mktemp -d 2>/dev/null || echo "$ROOT/.mkw-unpack.$$")
+  mkdir -p "$TMPD"
+  sed -n "/^# ==== $MARK ====\$/,/^# ==== $MARK-END ====\$/p" "$SELF" \
+    | sed '1d;$d;s/^# //' > "$TMPD/payload.b64"
+  DEC=""
+  for cand in "base64 -d" "base64 -D" "openssl base64 -d -a"; do
+    if $cand < "$TMPD/payload.b64" 2>/dev/null | gzip -t 2>/dev/null; then DEC="$cand"; break; fi
+  done
+  if [ -z "$DEC" ]; then
+    echo "Error: this file's own payload could not be decoded (needs base64 and"
+    echo "       gzip, both standard on macOS and Linux). Nothing was unpacked."
+    rm -rf "$TMPD"
+    [ -t 0 ] && read -r _ans
+    exit 1
+  fi
+  if ! $DEC < "$TMPD/payload.b64" | tar -xz -C "$TMPD"; then
+    echo "Error: the embedded tooling did not unpack. Nothing was changed here."
+    rm -rf "$TMPD"
+    [ -t 0 ] && read -r _ans
+    exit 1
+  fi
+  cp -R "$TMPD/$PKG/." "$ROOT/" || { echo "Error: copying into $ROOT failed."; rm -rf "$TMPD"; exit 1; }
+  rm -rf "$TMPD"
+  chmod +x "$ROOT/tools/"*.sh "$ROOT/tools/nro-webui.py" "$ROOT/tools/build-nro.sh" 2>/dev/null
+  echo " tools in place: $ROOT/tools/"
+  echo
+  echo " reopening now that the tooling is here..."
+  MKW_UNPACKED=1 "$BASH" "$SELF" "$@"
+  RC=$?
+  if [ -t 0 ]; then printf 'Press Enter to close: '; read -r _ans; fi
+  exit $RC
+fi
+export MKW_UNPACKED="${MKW_UNPACKED:-}"
+
+# The toolchain is fetched into this folder, so the whole thing stays portable,
+# unless this machine already has one at the usual spot - then use that.
+if [ ! -d "$HOME/mkw-toolchain/opt/devkitpro" ] && [ ! -d "$ROOT/.local/mkw-toolchain/opt/devkitpro" ]; then
+  MKW_TOOLCHAIN_PREFIX="$ROOT/.local/mkw-toolchain"
+  export MKW_TOOLCHAIN_PREFIX
+fi
+
+FINDER="$ROOT/tools/ensure-ui-env.sh"
+
+if [ -n "$MKW_UNPACKED" ]; then echo " (reopened after unpacking the tooling)"; fi
+
+case "${1:-}" in
+  --help)
+    "$BASH" tools/nro-engine.sh --help
+    echo
+    echo "Extra options for the window: --no-browser --port 8765 --dump path"
+    [ -t 0 ] && read -r _ans
+    exit 0
+    ;;
+esac
+
+PYCMD=""
+if [ -f "$FINDER" ]; then
+  PYCMD=$("$BASH" "$FINDER" --posix 2>/dev/null | tail -n 1 || true)
+fi
+[ -n "$PYCMD" ] || for cand in python3 python; do
+  if [ "$("$cand" -c 'print(1)' 2>/dev/null || true)" = "1" ]; then PYCMD="$cand"; break; fi
+done
+[ -n "$PYCMD" ] && echo " interface:    $PYCMD"
+
+# --plan and --stage are read-only answers, they do not need a window.
+case "${1:-}" in
+  --plan)  MKW_PLAN=1; export MKW_PLAN; mode=terminal ;;
+  --stage) mode=terminal ;;
+  --clean) mode=clean_leftovers ;;
+  --clean-all) mode=clean_everything ;;
+  *) mode=auto ;;
+esac
+
+if [ "$mode" = auto ] && [ -z "$PYCMD" ] && [ -t 0 ]; then
+  echo
+  echo " The window - pick a ROM, press Start, watch the progress - runs on Python 3,"
+  echo " and this machine has no reachable one."
+  "$BASH" "$FINDER" --reason
+  echo
+  printf 'Install Python 3 now and open the window? [y/N] '
+  read -r ans
+  case "$ans" in
+    [yY]|[yY][eE][sS])
+      "$BASH" "$FINDER" --install
+      PYCMD=$("$BASH" "$FINDER" --posix 2>/dev/null | tail -n 1 || true)
+      [ -n "$PYCMD" ] || echo " Still unreachable, so the build continues in this window."
+      ;;
+  esac
+fi
+
+if [ "$mode" = auto ] && [ -z "$PYCMD" ]; then mode=terminal; fi
+
+case "$mode" in
+  terminal)
+    echo
+    echo " entry point: $ROOT/tools/build-nro.sh"
+    echo " (Terminal mode: it asks for the dump path, then builds. Same engine, no window.)"
+    echo
+    "$BASH" tools/build-nro.sh "$@"
+    RC=$?
+    ;;
+  clean_leftovers)
+    echo
+    echo " Removing the throw-away parts: object files, translated shards, the extracted"
+    echo " game data. The .nro, the SD folder and the toolchain stay."
+    "$BASH" tools/clean-app.sh --leftovers
+    RC=$?
+    [ -t 0 ] && read -r _ans
+    exit $RC
+    ;;
+  clean_everything)
+    echo
+    echo " This removes everything this app made in this folder: the .nro, the drag-and-drop"
+    echo " SD folder, the source clone, the toolchain and the tooling it unpacked."
+    echo " Your own dump and anything else that was already here stay."
+    if [ -t 0 ]; then
+      printf 'Remove it all? [y/N] '
+      read -r ans
+      case "$ans" in
+        [yY]|[yY][eE][sS]) : ;;
+        *) echo " Nothing was removed."; [ -t 0 ] && read -r _ans; exit 1 ;;
+      esac
+    fi
+    "$BASH" tools/clean-app.sh --everything --yes
+    RC=$?
+    [ -d "$ROOT/tools" ] && rm -rf "$ROOT/tools"
+    echo
+    echo " This folder holds only MKWii-Builder.command again, plus your own files."
+    echo " Double-click that file whenever you want to build again."
+    [ -t 0 ] && read -r _ans
+    exit $RC
+    ;;
+  *)
+    echo " entry point: $ROOT/tools/nro-webui.py"
+    echo
+    echo " A window opens in your browser. There: pick a ROM, Start, progress."
+    echo " (No browser?  $PYCMD tools/nro-webui.py --no-browser  prints the address.)"
+    echo " Keep this terminal window open while it builds."
+    echo
+    "$PYCMD" tools/nro-webui.py "$@"
+    RC=$?
+    ;;
+esac
+
+echo
+if [ "${MKW_PLAN:-}" = 1 ]; then
+  echo "That was the plan only - nothing was built. Open the file again and press Start."
+elif [ "$RC" = 0 ]; then
+  echo "DONE."
+  echo "   drag-and-drop SD folder: dist/MarioKartWii-Switch/   (the switch/ folder goes at the root of your SD)"
+  echo "   the .nro itself:         WiiCompiled-Switch/local-product/native-deko3d/"
+  echo "The .sha256 file for checking is there too."
+else
+  echo "FAILED, exit code $RC. The full build log is in the logs/ folder."
+fi
+echo
+echo " The .nro contains recompiled Nintendo code: personal use only, do not publish it."
+echo " To undo what this folder got: the window has a Clean up card, or run this file"
+echo " with --clean (throw-away parts) or --clean-all (everything it made)."
+echo
+[ -t 0 ] && { printf 'Press Enter to close: '; read -r _ans; }
+exit $RC
+
+# ==== __PAYLOAD_NAME__ ====
+__PAYLOAD__
+# ==== __PAYLOAD_NAME__-END ====

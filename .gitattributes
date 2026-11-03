@@ -1,0 +1,6 @@
+# Every file in this repository is tooling text and every one of them is LF: bash
+# reads the scripts on macOS and Linux, where a stray CR breaks `set -euo pipefail`,
+# and the packaging hashes in dist/publish/SHA256SUMS.txt are computed over LF bytes.
+# Without this, a clone on a machine with core.autocrlf=true yields a tree whose
+# .sh files differ from the ones that were published.
+* text eol=lf
