@@ -63,19 +63,14 @@ die() { echo "error: $*" >&2; exit 1; }
 have_package_stack() { [ -f "$MARKER" ] && [ -f "$DAWN_LIB" ] && [ -f "$UAM_LIB" ] && [ -f "$RECEIPT" ]; }
 have_source_stack()  { [ -f "$DAWN_LIB" ] && [ -f "$UAM_LIB" ] && [ -d "$DAWN_DIR/.git" ]; }
 
-read_pin() { # read_pin <sleutel> — de pins-file is gegevens, geen shell-bron
+read_pin() { # read_pin <key> — the pins file is data, never a shell source
+  # No Python here on purpose. The engine may have found its interpreter under
+  # `python`, `py -3` or not at all, and this function decides whether the render
+  # stack arrives as a 76 MB package or gets compiled for hours. A missing
+  # `python3` must never be able to silently pick the slow route.
   [ -f "$PINS" ] || return 0
-  python3 - "$PINS" "$1" <<'PY'
-from pathlib import Path
-import sys
-for line in Path(sys.argv[1]).read_text().splitlines():
-    line = line.strip()
-    if not line or line.startswith("#") or "=" not in line:
-        continue
-    key, value = line.split("=", 1)
-    if key.strip() == sys.argv[2]:
-        print(value.strip().strip('"').strip("'"))
-PY
+  sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" "$PINS" | head -n 1 |
+    sed -e "s/^[\"']//" -e "s/[\"'][[:space:]]*$//"
 }
 
 # ---- manifest ---------------------------------------------------------------
@@ -172,36 +167,32 @@ do_make() {
   echo ">> pinned in: $PINS (fill in MKW_RENDER_DEPS_URL there once the file is hosted)"
 }
 
-write_pins() { # de pin bij het pakket houden: handmatig overschrijven is de foutenbron
-  local file="$1"
-  python3 - "$file" "$PINS" <<'PY'
-from pathlib import Path
-import hashlib
-import sys
-
-archive, pins = Path(sys.argv[1]), Path(sys.argv[2])
-digest = hashlib.sha256(archive.read_bytes()).hexdigest()
-values = {
-    "MKW_RENDER_DEPS_NAME": archive.name,
-    "MKW_RENDER_DEPS_SHA256": digest,
-    "MKW_RENDER_DEPS_BYTES": str(archive.stat().st_size),
-}
-lines = pins.read_text().splitlines() if pins.exists() else []
-seen = set()
-out = []
-for line in lines:
-    key = line.split("=", 1)[0].strip() if "=" in line and not line.strip().startswith("#") else None
-    if key in values:
-        out.append(f'{key}="{values[key]}"')
-        seen.add(key)
-    else:
-        out.append(line)
-for key, value in values.items():
-    if key not in seen:
-        out.append(f'{key}="{value}"')
-pins.write_text("\n".join(out) + "\n")
-print(f">> pins updated in {pins}: {digest}")
-PY
+write_pins() { # keep the pin with the package: retyping it by hand is the error source
+  # awk, not Python: `--make` runs on the build host, and that host decides later
+  # whether the stack arrives as a package or gets compiled — see read_pin().
+  local file="$1" digest name bytes
+  digest="$(sha "$file")"
+  name="$(basename "$file")"
+  bytes="$(bytes_of "$file")"
+  [ -f "$PINS" ] || : > "$PINS"
+  awk -v name="$name" -v digest="$digest" -v bytes="$bytes" '
+    function setline(key, value) { print key "=\"" value "\""; seen[key] = 1 }
+    {
+      key = $0
+      if (key ~ /^[[:space:]]*#/ || key !~ /=/) { print; next }
+      sub(/[[:space:]]*=.*$/, "", key); gsub(/^[[:space:]]+|[[:space:]]+$/, "", key)
+      if (key == "MKW_RENDER_DEPS_NAME")   { setline(key, name);   next }
+      if (key == "MKW_RENDER_DEPS_SHA256") { setline(key, digest); next }
+      if (key == "MKW_RENDER_DEPS_BYTES")  { setline(key, bytes);  next }
+      print
+    }
+    END {
+      if (!seen["MKW_RENDER_DEPS_NAME"])   setline("MKW_RENDER_DEPS_NAME", name)
+      if (!seen["MKW_RENDER_DEPS_SHA256"]) setline("MKW_RENDER_DEPS_SHA256", digest)
+      if (!seen["MKW_RENDER_DEPS_BYTES"])  setline("MKW_RENDER_DEPS_BYTES", bytes)
+    }
+  ' "$PINS" > "$PINS.new" && mv -f "$PINS.new" "$PINS"
+  echo ">> pins updated in $PINS: $digest"
 }
 
 # ---- --install --------------------------------------------------------------

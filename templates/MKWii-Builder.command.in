@@ -138,10 +138,23 @@ if ! has_git; then
   echo " git is in place: $(git --version 2>/dev/null)"
 fi
 
-# ---- step 1: this file carries its own tooling; unpack it once ----------------
-if [ ! -f "$ROOT/tools/nro-engine.sh" ]; then
+# ---- step 1: this file carries its own tooling; unpack it when needed --------
+# The stamp is the sha256 of the payload inside this file. Without it, a folder
+# where someone already ran an older copy is indistinguishable from a fresh one,
+# so that older tooling - the render-stack pins included - would stay in place
+# forever and no fix shipped in a newer file would ever reach its user.
+MKW_STAMP="__PAYLOAD_STAMP__"
+tools_are_current() {
+  [ -f "$ROOT/tools/nro-engine.sh" ] &&
+    [ "$(head -n 1 "$ROOT/.mkw-payload-stamp" 2>/dev/null)" = "$MKW_STAMP" ]
+}
+if ! tools_are_current; then
   echo
-  echo " first run: unpacking the builder into this folder"
+  if [ -f "$ROOT/tools/nro-engine.sh" ]; then
+    echo " this folder has older tooling - refreshing it from this file"
+  else
+    echo " first run: unpacking the builder into this folder"
+  fi
   TMPD=$(mktemp -d 2>/dev/null || echo "$ROOT/.mkw-unpack.$$")
   mkdir -p "$TMPD"
   sed -n "/^# ==== $MARK ====\$/,/^# ==== $MARK-END ====\$/p" "$SELF" \
@@ -165,6 +178,7 @@ if [ ! -f "$ROOT/tools/nro-engine.sh" ]; then
   fi
   cp -R "$TMPD/$PKG/." "$ROOT/" || { echo "Error: copying into $ROOT failed."; rm -rf "$TMPD"; exit 1; }
   rm -rf "$TMPD"
+  printf '%s\n' "$MKW_STAMP" > "$ROOT/.mkw-payload-stamp"
   chmod +x "$ROOT/tools/"*.sh "$ROOT/tools/nro-webui.py" "$ROOT/tools/build-nro.sh" 2>/dev/null
   echo " tools in place: $ROOT/tools/"
   echo

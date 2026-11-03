@@ -61,7 +61,7 @@ dirsize() {
 
 # The top-level names this app creates. Nothing else is ever a candidate.
 APP_DIRS="WiiCompiled-Switch discs dist docker logs switch-ops templates tools .local .deps out .nod-cache"
-APP_FILES="Bouw-NRO.cmd bouw-nro.command README-Switch-Port.md"
+APP_FILES="Bouw-NRO.cmd bouw-nro.command README-Switch-Port.md .mkw-payload-stamp"
 
 FREED=0
 REMOVED=""

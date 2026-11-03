@@ -42,7 +42,7 @@ fi
 
 echo "== Stap 2/3: zip + uitpakkers in het sjabloon =="
 python - "$ZIP" "$TEMPLATE" "$UNPACK" "$TARGET" "$MARK" "$CHECK_ONLY" "$SHELL_TEMPLATE" "$SHELL_TARGET" <<'PY'
-import base64, gzip, io, os, sys, tarfile, zipfile
+import base64, gzip, hashlib, io, os, sys, tarfile, zipfile
 
 (zip_path, template_path, unpack_path, target_path, mark, check_only,
  shell_template, shell_target) = sys.argv[1:9]
@@ -65,12 +65,19 @@ for n in names:
 body = base64.encodebytes(raw).decode("ascii").strip().splitlines()
 payload = "\n".join("rem " + line for line in body)
 
+# De stempel is de sha256 van precies deze ingebedde zip. Een map waarin iemand
+# dit product al een keer heeft gedraaid, is van buiten niet van een nieuwere te
+# onderscheiden, en zonder stempel blijft zo'n map zijn eigen gereedschap gebruiken:
+# dan bereikt geen enkele reparatie iemand die het dubbelklikken al eens deed.
+stamp = hashlib.sha256(raw).hexdigest()
+
 text = io.open(template_path, encoding="utf-8").read()
-for token in ("__PS1__", "__PAYLOAD_NAME__", "__PAYLOAD__"):
+for token in ("__PS1__", "__PAYLOAD_NAME__", "__PAYLOAD_STAMP__", "__PAYLOAD__"):
     if token not in text:
         raise SystemExit("Fout: sjabloon heeft geen " + token)
 out = (text.replace("__PS1__", ps1)
            .replace("__PAYLOAD_NAME__", mark)
+           .replace("__PAYLOAD_STAMP__", stamp)
            .replace("__PAYLOAD__", payload))
 out = out.replace("\r\n", "\n").replace("\n", "\r\n")
 
@@ -105,10 +112,12 @@ sbody = base64.encodebytes(zin.getvalue()).decode("ascii").strip().splitlines()
 spayload = "\n".join("# " + line for line in sbody)
 
 stext = io.open(shell_template, encoding="utf-8").read()
-for token in ("__PAYLOAD_NAME__", "__PAYLOAD__"):
+for token in ("__PAYLOAD_NAME__", "__PAYLOAD_STAMP__", "__PAYLOAD__"):
     if token not in stext:
         raise SystemExit("Fout: .command-sjabloon heeft geen " + token)
-sout = stext.replace("__PAYLOAD_NAME__", mark).replace("__PAYLOAD__", spayload)
+sout = (stext.replace("__PAYLOAD_NAME__", mark)
+              .replace("__PAYLOAD_STAMP__", stamp)
+              .replace("__PAYLOAD__", spayload))
 sout = sout.replace("\r\n", "\n")
 
 if check_only == "1":

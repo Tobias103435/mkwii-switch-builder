@@ -7,5 +7,7 @@ discs/
 logs/
 tools/nod/
 switch-ops/switch.env
+# Written by MKWii-Builder.cmd/.command: which payload is unpacked here.
+.mkw-payload-stamp
 __pycache__/
 *.pyc

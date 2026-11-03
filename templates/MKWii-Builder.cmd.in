@@ -116,10 +116,21 @@ exit /b 1
 
 :after_bash
 
-rem ---- step 1: this file carries its own tooling; unpack it once --------------
-if exist "tools\nro-engine.sh" goto have_tools
+rem ---- step 1: this file carries its own tooling; unpack it when needed -------
+rem The stamp below is the sha256 of the payload inside this file. A folder where
+rem someone already ran an older copy looks exactly like a fresh one from here, so
+rem without the stamp it keeps using its own tooling forever - and then no fix that
+rem ships in a newer file ever reaches the person who double-clicked first.
+set "MKW_STAMP=__PAYLOAD_STAMP__"
+set "MKW_OLDSTAMP="
+if exist ".mkw-payload-stamp" set /p MKW_OLDSTAMP=<".mkw-payload-stamp"
+if not exist "tools\nro-engine.sh" goto unpack_tools
+if "%MKW_OLDSTAMP%"=="%MKW_STAMP%" goto have_tools
+set "MKW_REFRESH=1"
+
+:unpack_tools
 echo.
-echo  first run: unpacking the builder into this folder
+if defined MKW_REFRESH (echo  this folder has older tooling - refreshing it from this file) else (echo  first run: unpacking the builder into this folder)
 rem -EncodedCommand takes no extra arguments, so the paths travel by environment.
 set "MKW_SRC=%~f0"
 set "MKW_ROOT=%ROOT%"
@@ -132,6 +143,7 @@ if not exist "tools\nro-engine.sh" (
   if not defined MKW_NOPAUSE pause
   exit /b 1
 )
+> ".mkw-payload-stamp" echo %MKW_STAMP%
 echo  tools in place: %ROOT%tools\
 echo.
 echo  reopening now that the tooling is here...
