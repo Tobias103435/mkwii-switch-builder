@@ -46,6 +46,19 @@ IMAGE="mkw-host:1"
 VOLUME="mkwdeps"
 CONTAINER_DEPS="/deps/native-deko3d"          # pad binnenuit het volume
 
+# Git op Windows weigert een werkmap op een schijf die geen eigenaarschap bijhoudt
+# — exFAT, FAT32, een USB-schijf, een netwerkmap — en dan faalt élk commando in
+# die boom met "detected dubious ownership". Een clone ziet er dan netjes uit en
+# zijn submodules lezen "empty", precies wat een veldrapport onverklaarbaar liet
+# lijken. De uitzondering hoort bij dit proces, niet bij iemands globale
+# git-config: GIT_CONFIG_* wordt geërfd door elke git die hieronder draait, ook
+# door `submodule update --recursive` en door de builder. Een map die deze app
+# zelf kloonde of in haar eigen folder vond, is per definitie een map van haar.
+: "${GIT_CONFIG_COUNT:=0}"
+export "GIT_CONFIG_KEY_${GIT_CONFIG_COUNT}=safe.directory"
+export "GIT_CONFIG_VALUE_${GIT_CONFIG_COUNT}=*"
+export GIT_CONFIG_COUNT=$((GIT_CONFIG_COUNT + 1))
+
 # Deps-kaart voor de native-route. De motor zoekt zelf, zodat een dubbelklik
 # zonder één vlag werkt: $MKW_DEPS_DIR wint, daarna de vaste plekken waar een
 # eerdere run of een setup-nehaalactie iets neerlegt. Een boom telt alleen als
@@ -556,10 +569,12 @@ if want src; then
       # "It is incomplete" is not something a person can act on. The three causes
       # that actually occur here get named, with the number that proves it.
       why=""
-      for pat in 'filename too long' 'no space left on device|enospc|unable to create file' \
+      for pat in 'dubious ownership|safe\.directory' 'filename too long' \
+                 'no space left on device|enospc|unable to create file' \
                  'could not resolve host|failed to connect|unable to access|returned error: 4|connection reset|the remote end hung up'; do
         if tr -d '\r' < "$WS/logs/src-submodule.log" 2>/dev/null | grep -qiE "$pat"; then
           case "$pat" in
+            'dubious ownership'*) why="the drive holding this folder does not record file ownership (exFAT, FAT32, a USB or network share), and git refuses to work in such a folder until it is trusted. This builder trusts its own folder from now on; by hand that is: git config --global --add safe.directory $REPO" ;;
             'filename too long') why="Windows refused to create paths this deep. Enable them once, as administrator: git config --system core.longpaths true" ;;
             *enospc*)            why="the disk is full — $(( $(free_bytes "$WS") / 1073741824 )) GiB free on this folder, this fetch wants about 10 GiB" ;;
             *)                   why="github was not reachable for this fetch — check the network (a VPN or proxy can block it) and start again" ;;

@@ -15,8 +15,11 @@ hands you a zip whose contents sit at their real SD paths.
    stack, extracts the game data with `nod`, compiles, and packages.
 4. Unpack the resulting zip onto the SD root and start the `.nro` from hbmenu.
 
-Needs about 8 GiB free and a few minutes on a normal desktop. Docker is optional —
-the builder can run devkitA64 natively.
+Needs about 8 GiB free and a few minutes on a normal desktop. Put the folder on the
+PC's own disk: a USB stick or an exFAT drive works too, but git refuses to work in a
+folder whose drive does not record file ownership until it is trusted — the builder
+trusts its own folder (and only that one) instead of stopping there. Docker is
+optional — the builder can run devkitA64 natively.
 
 The dump is **not** in this repository and cannot be: you have to bring your own
 copy of the game. The built `.nro` and the extracted game data are guest code, so
