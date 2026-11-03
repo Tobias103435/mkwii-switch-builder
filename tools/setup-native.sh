@@ -66,9 +66,13 @@ TARGET_PKGS="libnx deko3d switch-cmake devkita64-cmake dkp-cmake-common-utils de
 HOST_PKGS="devkita64-gcc devkita64-binutils switch-tools general-tools"
 
 TAR_BIN=tar
-if [ "$HOST_OS" = windows ] && [ -x /c/Windows/System32/tar.exe ]; then
-  # Windows' bsdtar kan .zst en .xz; de tar uit Git Bash niet altijd.
-  TAR_BIN=/c/Windows/System32/tar.exe
+if [ "$HOST_OS" = windows ]; then
+  # Windows' bsdtar kan .zst en .xz; de tar uit Git Bash niet altijd. De Windows-map
+  # volgt $SYSTEMROOT, want een installatie op een andere schijfletter dan C: bestaat
+  # ook; de /c/-vorm blijft als back-up voor een shell zonder die variabele.
+  for _t in "${SYSTEMROOT:-C:/Windows}/System32/tar.exe" /c/Windows/System32/tar.exe; do
+    [ -x "$_t" ] && { TAR_BIN="$_t"; break; }
+  done
 fi
 
 say() { printf '%s\n' "$*"; }

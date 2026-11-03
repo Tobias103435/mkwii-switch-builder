@@ -516,33 +516,64 @@ if want src; then
     stage src ok "source not fetched here yet: a real run clones $REPO and checks the pins"
   else
     if [ ! -d "$REPO/.git" ]; then
-      git clone --config core.autocrlf=input https://github.com/yashin-sh/WiiCompiled-Switch "$REPO"
+      # Git's own progress text goes nowhere in this contract: both frontends drop
+      # every line that is not NDJSON. So it belongs in the log, next to the
+      # submodule fetch it is the first half of, where a failure can be read.
+      # core.longpaths is a known key on every platform and only means something
+      # on Windows, where DriftDroid's Dawn tree is far past the 260-character
+      # limit: without it the clone looks fine and the submodule stays empty.
+      stage src start "cloning WiiCompiled-Switch (github, a few hundred MB)"
+      if ! git clone --config core.autocrlf=input --config core.longpaths=true \
+           https://github.com/yashin-sh/WiiCompiled-Switch "$REPO" \
+           >>"$WS/logs/src-submodule.log" 2>&1; then
+        fail "the clone of WiiCompiled-Switch did not finish — github unreachable, or no room left ($(( $(free_bytes "$WS") / 1073741824 )) GiB free on this folder). Details: logs/src-submodule.log"
+      fi
       stage src ok "repo cloned"
     fi
-    if git -C "$REPO" submodule status --recursive 2>/dev/null | grep -q '^-[0-9a-f]'; then
-      [ "$PLAN_ONLY" = 1 ] || git -C "$REPO" submodule update --init --recursive
-      stage src ok "submodules fetched"
-    fi
     # Een submodule die half is aangekomen - de schijf liep vol tijdens de eerste
-    # run, of de map werd tussen schijven verplaatst en de diepe Dawn-paden en
-    # `.git/modules` zijn niet volledig meegeraakt - leest niet "niets" maar het
-    # hoofd van de bovenliggende repo, want een map zonder `.git` zoekt erboven
-    # verder. Dus: één keer zelf proberen te herstellen vóór er iets geëist wordt.
-    # `submodule update --init` zet precies de gepinde commit weer neer.
+    # run, of de map werd tussen schijven verplaatst en `.git/modules` en de diepe
+    # Dawn-paden zijn niet volledig meegeraakt - leest niet "niets" maar het hoofd
+    # van de bovenliggende repo, want een map zonder `.git` zoekt erboven verder.
+    # Dus: eerst zelf halen en herstellen, dan pas iets eisen. `submodule update
+    # --init` zet precies de gepinde commit weer neer, en dat is ook wat een verse
+    # clone hier mist.
     ref_head="$(git -C "$REPO/third_party/DriftDroid" rev-parse HEAD 2>/dev/null || echo empty)"
-    if [ "$ref_head" != "$REF_PIN" ] && [ "$PLAN_ONLY" != 1 ]; then
-      stage src start "the DriftDroid reference reads $ref_head - fetching the submodules again"
-      git -C "$REPO" submodule update --init --recursive >>"$WS/logs/src-submodule.log" 2>&1 || :
-      ref_head="$(git -C "$REPO/third_party/DriftDroid" rev-parse HEAD 2>/dev/null || echo empty)"
+    if [ "$ref_head" != "$REF_PIN" ]; then
+      if [ "$PLAN_ONLY" = 1 ]; then
+        # In plan-modus is een bron die hier nog niet ligt geen fout: er wordt nog
+        # niets gerepareerd, dus gezegd wordt wat een echte run doen zou.
+        stage src ok "plan: this clone has no DriftDroid reference yet — a real run fetches and checks it"
+      else
+        stage src start "fetching the submodules (DriftDroid and WiiCompiled) — a few hundred MB, the window stays quiet while git works"
+        git -C "$REPO" -c core.longpaths=true submodule update --init --recursive \
+          >>"$WS/logs/src-submodule.log" 2>&1 || :
+        ref_head="$(git -C "$REPO/third_party/DriftDroid" rev-parse HEAD 2>/dev/null || echo empty)"
+      fi
     fi
     if [ "$ref_head" = "$REF_PIN" ]; then
       stage src ok "repo at $(git -C "$REPO" rev-parse --short HEAD), DriftDroid ref = pin"
-    elif [ "$PLAN_ONLY" = 1 ]; then
-      # In plan-modus is een bron die hier nog niet ligt geen fout: er is niets te
-      # repareren zolang er niets gedraaid wordt, en een echte run haalt en checkt hem.
-      stage src ok "plan: this clone has no DriftDroid reference yet — a real run fetches and checks it"
-    else
-      fail "the WiiCompiled-Switch clone in this folder is incomplete: its DriftDroid reference reads '$ref_head' instead of the pinned $REF_PIN. That happens when a disk filled up mid-clone or when the folder was moved between drives. Repair: git -C WiiCompiled-Switch submodule update --init --recursive   (needs network and room; details go to logs/src-submodule.log) — or delete the WiiCompiled-Switch folder and run this again: it is cloned fresh, and nothing else in this folder is touched."
+    elif [ "$PLAN_ONLY" != 1 ]; then
+      # "It is incomplete" is not something a person can act on. The three causes
+      # that actually occur here get named, with the number that proves it.
+      why=""
+      for pat in 'filename too long' 'no space left on device|enospc|unable to create file' \
+                 'could not resolve host|failed to connect|unable to access|returned error: 4|connection reset|the remote end hung up'; do
+        if tr -d '\r' < "$WS/logs/src-submodule.log" 2>/dev/null | grep -qiE "$pat"; then
+          case "$pat" in
+            'filename too long') why="Windows refused to create paths this deep. Enable them once, as administrator: git config --system core.longpaths true" ;;
+            *enospc*)            why="the disk is full — $(( $(free_bytes "$WS") / 1073741824 )) GiB free on this folder, this fetch wants about 10 GiB" ;;
+            *)                   why="github was not reachable for this fetch — check the network (a VPN or proxy can block it) and start again" ;;
+          esac
+          break
+        fi
+      done
+      # Git writes one long "line" per progress flush, so the tail is capped and
+      # ASCII-only: the message must stay readable, and a partial UTF-8 sequence
+      # would break the NDJSON line. The full text is in the log.
+      tail6=$(tr -d '\r' < "$WS/logs/src-submodule.log" 2>/dev/null | tail -n 6 \
+              | tr '\n' ' ' | tr -cd '\040-\176' | tail -c 500)
+      [ ${#tail6} -ge 500 ] && tail6="... $tail6"
+      fail "the WiiCompiled-Switch clone in this folder has no DriftDroid reference: it reads '$ref_head' instead of the pinned $REF_PIN.${why:+ Cause: $why.} Repair it from a terminal in this folder with: git -C WiiCompiled-Switch submodule update --init --recursive (details: logs/src-submodule.log) — or delete the WiiCompiled-Switch folder and run this again: it is cloned fresh, and nothing else in this folder is touched.${tail6:+ Last log lines: $tail6}"
     fi
     # Een pakket levert de renderstack als bytes in plaats van als bronboom, en
     # de ontvangst-poort van de productbouw accepteert die vorm alleen met een

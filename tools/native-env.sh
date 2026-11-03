@@ -87,16 +87,18 @@ native_probe() {
     for cand in "${portable:+$portable/opt/devkitpro}" \
                 /opt/devkitpro \
                 "$HOME/mkw-toolchain/opt/devkitpro" \
+                "${SYSTEMDRIVE:-}/devkitPro" \
+                "${SYSTEMDRIVE:-}/msys64/opt/devkitpro" "${SYSTEMDRIVE:-}/msys64/devkitPro" \
+                "${LOCALAPPDATA:-}/devkitPro" \
                 /c/devkitPro \
                 /c/msys64/opt/devkitpro /c/msys64/devkitPro \
-                "${LOCALAPPDATA:-}/devkitPro" \
                 /usr/local/devkitpro /opt/homebrew/opt/devkitpro; do
       [ -n "$cand" ] || continue
       [ -f "$cand/cmake/Switch.cmake" ] && break
     done
   fi
   [ -n "$cand" ] && [ -f "$cand/cmake/Switch.cmake" ] || {
-    NATIVE_MISS="no devkitPro install found (tried \$DEVKITPRO, the app's own toolchain folder, /opt/devkitpro, C:\\devkitPro, msys64). Install devkitA64 + libnx, or let the engine build via --docker."
+    NATIVE_MISS="no devkitPro install found (tried \$DEVKITPRO, the app's own toolchain folder, /opt/devkitpro, the system drive's devkitPro and msys64). Install devkitA64 + libnx, or let the engine build via --docker."
     return 1
   }
   export DEVKITPRO="$cand"
@@ -151,9 +153,20 @@ native_toolchain_win_patch() {
 # geen reden om verificatie uit te zetten (CMAKE_TLS_VERIFY=0 blijft verboden).
 native_ca_bundle() {
   local c
+  # De Git-installatie waardoor deze shell zelf draait is de zekerste bron: `cygpath
+  # -w /` is háár map, op welke schijfletter die ook staat. Zonder die zoeker zou
+  # een builder op D: of E: zijn CA-bundle moeten missen terwijl hij die bij zich
+  # heeft. msys2 geeft met dezelfde regel zijn eigen mingw64-bundle.
+  local gitroot=""
+  if command -v cygpath >/dev/null 2>&1; then
+    gitroot="$(cygpath -w / 2>/dev/null | sed 's%[\\/]*$%%')"
+  fi
   for c in "${MKW_TLS_CAINFO:-}" \
+           "${gitroot:+$gitroot/mingw64/etc/ssl/certs/ca-bundle.crt}" \
            "${LOCALAPPDATA:-}/mkw-ca/cacert.pem" \
            "$HOME/mkw-toolchain/ssl/ca-bundle.crt" \
+           "${SYSTEMDRIVE:-}/msys64/mingw64/etc/ssl/certs/ca-bundle.crt" \
+           "${SYSTEMDRIVE:-}/Program Files/Git/mingw64/etc/ssl/certs/ca-bundle.crt" \
            /c/mingw64/etc/ssl/certs/ca-bundle.crt \
            /c/msys64/etc/ssl/certs/ca-bundle.crt \
            "/c/Program Files/Git/mingw64/etc/ssl/certs/ca-bundle.crt" \
