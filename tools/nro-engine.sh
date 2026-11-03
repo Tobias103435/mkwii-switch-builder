@@ -523,9 +523,27 @@ if want src; then
       [ "$PLAN_ONLY" = 1 ] || git -C "$REPO" submodule update --init --recursive
       stage src ok "submodules fetched"
     fi
+    # Een submodule die half is aangekomen - de schijf liep vol tijdens de eerste
+    # run, of de map werd tussen schijven verplaatst en de diepe Dawn-paden en
+    # `.git/modules` zijn niet volledig meegeraakt - leest niet "niets" maar het
+    # hoofd van de bovenliggende repo, want een map zonder `.git` zoekt erboven
+    # verder. Dus: één keer zelf proberen te herstellen vóór er iets geëist wordt.
+    # `submodule update --init` zet precies de gepinde commit weer neer.
     ref_head="$(git -C "$REPO/third_party/DriftDroid" rev-parse HEAD 2>/dev/null || echo empty)"
-    [ "$ref_head" = "$REF_PIN" ] || fail "DriftDroid ref $ref_head != pin $REF_PIN"
-    stage src ok "repo at $(git -C "$REPO" rev-parse --short HEAD), DriftDroid ref = pin"
+    if [ "$ref_head" != "$REF_PIN" ] && [ "$PLAN_ONLY" != 1 ]; then
+      stage src start "the DriftDroid reference reads $ref_head - fetching the submodules again"
+      git -C "$REPO" submodule update --init --recursive >>"$WS/logs/src-submodule.log" 2>&1 || :
+      ref_head="$(git -C "$REPO/third_party/DriftDroid" rev-parse HEAD 2>/dev/null || echo empty)"
+    fi
+    if [ "$ref_head" = "$REF_PIN" ]; then
+      stage src ok "repo at $(git -C "$REPO" rev-parse --short HEAD), DriftDroid ref = pin"
+    elif [ "$PLAN_ONLY" = 1 ]; then
+      # In plan-modus is een bron die hier nog niet ligt geen fout: er is niets te
+      # repareren zolang er niets gedraaid wordt, en een echte run haalt en checkt hem.
+      stage src ok "plan: this clone has no DriftDroid reference yet — a real run fetches and checks it"
+    else
+      fail "the WiiCompiled-Switch clone in this folder is incomplete: its DriftDroid reference reads '$ref_head' instead of the pinned $REF_PIN. That happens when a disk filled up mid-clone or when the folder was moved between drives. Repair: git -C WiiCompiled-Switch submodule update --init --recursive   (needs network and room; details go to logs/src-submodule.log) — or delete the WiiCompiled-Switch folder and run this again: it is cloned fresh, and nothing else in this folder is touched."
+    fi
     # Een pakket levert de renderstack als bytes in plaats van als bronboom, en
     # de ontvangst-poort van de productbouw accepteert die vorm alleen met een
     # extra tak. Upstream heeft die tak niet en wij kunnen daar niet pushen, dus
