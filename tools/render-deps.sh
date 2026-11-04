@@ -56,7 +56,18 @@ PACK_PATHS=(
   "uam/build-switch/libuam.a"
 )
 
-sha() { sha256sum "$1" | awk '{print $1}'; }
+# macOS heeft geen sha256sum (wel shasum), Linux heeft geen shasum gegarandeerd.
+# Deze helper is de enige plek die dat verschil mag kennen: --install en --verify
+# lopen erlangs, en op een Mac is de hashcontrole anders de eerste fout die iemand
+# van dit pakket ooit zal zien.
+sha() {
+  local h
+  if command -v sha256sum >/dev/null 2>&1; then h="$(sha256sum "$1")"
+  elif command -v shasum >/dev/null 2>&1; then h="$(shasum -a 256 "$1")"
+  else die "no sha256 tool here (need sha256sum or shasum)"
+  fi
+  printf '%s\n' "${h%% *}"
+}
 bytes_of() { wc -c < "$1" | tr -d ' '; }
 die() { echo "error: $*" >&2; exit 1; }
 
@@ -158,7 +169,8 @@ do_make() {
       .mkw-render-package MANIFEST.txt LICENSES.txt native-deko3d-toolchain.receipt \
       dawn dawn-build-switch uam LICENSES || die "packing failed"
   rm -rf "$stage"
-  ( cd "$(dirname "$out")" && sha256sum "$(basename "$out")" > "$(basename "$out").sha256" )
+  # Sidecar in de vorm die `sha256sum -c` verwacht: hash, twee spaties, naam.
+  ( cd "$(dirname "$out")" && printf '%s  %s\n' "$(sha "$(basename "$out")")" "$(basename "$out")" > "$(basename "$out").sha256" )
 
   echo ">> package: $out ($(bytes_of "$out") bytes)"
   echo ">> sha256 : $(sha "$out")"

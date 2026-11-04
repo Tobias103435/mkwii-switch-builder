@@ -483,7 +483,11 @@ if want env; then
   else
     stage env start "checking docker, image and volume"
     command -v docker >/dev/null 2>&1 || fail "no docker here, and no devkitA64 toolchain either. A real run fetches that toolchain by itself (into .local/mkw-toolchain, a few GB, one time); installing Docker is only the alternative."
-    docker info >/dev/null 2>&1 || fail "the docker daemon is not running (start Docker)"
+    # Op een Linux met Docker Desktop is de CLI er wél en de daemon niet: dan is
+    # "start Docker" het enige advies dat hier stond, terwijl de native-route die
+    #zelfde run zelf kan voorzien. Beide wegen noemen, anders klinkt een plan als
+    # een voorwaarde die niet bestaat.
+    docker info >/dev/null 2>&1 || fail "the docker CLI is here but its daemon is not running — start Docker, or just press build: a real run fetches the toolchain into .local/mkw-toolchain (a few GB, one time) and builds without Docker at all"
     if docker image inspect "$IMAGE" >/dev/null 2>&1; then
       stage env ok "image $IMAGE present"
     elif [ "$PLAN_ONLY" = 1 ]; then
