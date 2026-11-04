@@ -9,7 +9,7 @@ rem nothing leaves it, and your dump is never moved or deleted.
 rem
 rem Needs: Windows 10 or 11, Git for Windows (this file offers to install it when it
 rem is missing - it is what brings bash), your own PAL RMCP01 dump (.rvz .wbfs .iso
-rem .gcm), and about 8 GiB of free space in this folder.
+rem .gcm), and about 12 GiB of free space in this folder.
 rem
 rem This is the Windows twin: MKWii-Builder.command is the same single file for
 rem macOS and Linux. Double-clicking a .cmd on a Mac opens it in a text editor,

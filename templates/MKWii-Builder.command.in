@@ -11,7 +11,7 @@
 #
 # Needs: macOS 12+ or a Linux distro with bash 3.2+ (both already installed), git
 # (this file offers to install it when it is missing), your own PAL RMCP01 dump
-# (.rvz .wbfs .iso .gcm), and about 8 GiB of free space in this folder.
+# (.rvz .wbfs .iso .gcm), and about 12 GiB of free space in this folder.
 #
 # Options:  sh MKWii-Builder.command --full  --zip  --plan  --help  --no-map
 #           --clean removes the throw-away build files, --clean-all removes

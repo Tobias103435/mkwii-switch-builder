@@ -15,7 +15,7 @@ hands you a zip whose contents sit at their real SD paths.
    stack, extracts the game data with `nod`, compiles, and packages.
 4. Unpack the resulting zip onto the SD root and start the `.nro` from hbmenu.
 
-Needs about 8 GiB free and a few minutes on a normal desktop. Put the folder on the
+Needs about 12 GiB free and a few minutes on a normal desktop. Put the folder on the
 PC's own disk: a USB stick or an exFAT drive works too, but git refuses to work in a
 folder whose drive does not record file ownership until it is trusted — the builder
 trusts its own folder (and only that one) instead of stopping there. Docker is

@@ -503,15 +503,19 @@ if want env; then
     fi
   fi
   # Ruimte-poort vóór het werk: een bouw die halverwege op een volle schijf loopt,
-  # kost de gebruiker een uur en laat een halve boom achter. De getallen zijn gemeten
-  # op een volledige native bouw (2026-11-02): 2,5 GiB uitgepakte game-data + 1,8 GiB
-  # objecten en link + 0,4 GiB shards + 2,6 GiB sleepbare SD-map, afgerond naar 8.
-  # De eenmalige renderstack telt alleen mee als hij nog niet staat: 6 GiB als
-  # deze hem zelf bouwt (Dawn-bom + build-tree), 2 GiB als het pakket hem komt
-  # halen — de piek is download + uitpak-map + geplaatste boom, dus 600 MB die
-  # twee keer langs komt. Het gereedschap (0,7 GiB) is verwaarloosbaar achter
-  # deze afronding.
-  need_gib=8
+  # De eisen van 8 GiB waren te laag en dat is twee keer in de Praktijk teruggekomen:
+  # een bouw die bij de vertaling omvalt omdat de schijf vol loopt, laat géén
+  # foutmelding achter die naar ruimte wijst, maar een halve boom en een
+  # binutils-assert. Nagemeten op deze host (2026-11-03, volledige native bouw):
+  # <deps> is 11 GiB geworden waarvan 4,7 GiB objecten + build.ninja, de shards
+  # 0,4 GiB, local-product 1,2 GiB, de uitgepakte game-data 2,5 GiB en de
+  # sleepbare SD-map nog eens 2,6 GiB. Daarom: 12 GiB als bodem, afgerond naar
+  # beneden omdat ccache (max 8 GiB) zelden vol staat en de SD-map alleen bij
+  # deliver komt. De eenmalige renderstack telt alleen mee als hij nog niet staat:
+  # 6 GiB als deze hem zelf bouwt (Dawn-bom + build-tree), 2 GiB als het pakket hem
+  # komt halen — de piek is download + uitpak-map + geplaatste boom, dus 600 MB die
+  # twee keer langs komt. Het gereedschap (0,7 GiB) is verwaarloosbaar.
+  need_gib=12
   if [ "$BACKEND" != docker ] && ! deps_is_ready "$DEPS_DIR"; then
     if [ "$RENDER_PLAN" = package ]; then
       need_gib=$(( need_gib + 2 ))
@@ -709,7 +713,11 @@ if want build; then
       # achter. De oorzaak wél benoemen is het verschil tussen "wegklikken en
       # nog eens proberen" en iemand die weet dat hij ruimte moet maken.
       if tr -d '\r' < "$raw" | grep -qiE 'no space left on device|not enough space|ENOSPC|disk is full|volume is full'; then
-        fail "the disk ran out of space while building — $(( $(free_bytes "$WS") / 1073741824 )) GiB free on $WS now, a full build wants about 10 GiB. Free up room (the Clean up button, or bash tools/sweep-temp.sh, removes the extract and build caches and keeps the toolchain) and start again."
+        # Een schrijffout van de assembler ziet eruit als een compilerbug (BFD
+        # assertion fail) en als de melding dat niet rechtzet, gaat iemand op zoek
+        # naar een verkeerde toolchain. Dus: de oorzaak, wat hem oploopt, en wat
+        # er wél en níét weggaat als hij opruimt.
+        fail "the disk ran out of space while building — $(( $(free_bytes "$WS") / 1073741824 )) GiB free on $WS now, and a full build wants about 12 GiB (measured: 4.7 GiB of objects, 0.4 GiB of translated shards, 2.5 GiB of extracted game data, 2.6 GiB for the SD folder; the lines above about a binutils assertion are this same write failing). Free up room and start again: the Clean up button, or bash tools/sweep-temp.sh --deps $DEPS_DIR --ws $WS with --keep-cache left out, removes the objects and shards again, and ccache -c clears up to 8 GiB of compile cache. The toolchain and the render stack stay where they are."
       fi
       if tr -d '\r' < "$raw" | grep -qiE 'Python was not found|app execution aliases|install from the Microsoft Store'; then
         fail "the translation needs Python, and on this PC the name python3 still resolves to the Microsoft Store shortcut instead of an interpreter. The builder normally corrects that inside its own run; if this line appears anyway, install Python 3 once from python.org — or turn the shortcut off: Settings > Apps > Advanced app settings > App execution aliases > python.exe and python3.exe — and start again."
