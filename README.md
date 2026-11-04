@@ -1,8 +1,16 @@
 # Mario Kart Wii → Switch: native builder
 
+[![smoke](https://github.com/Tobias103435/mkwii-switch-builder/actions/workflows/smoke.yml/badge.svg)](https://github.com/Tobias103435/mkwii-switch-builder/actions/workflows/smoke.yml)
+
 One click that turns **your own** Mario Kart Wii (PAL, `RMCP01`) dump into a
 *native* Switch `.nro` — statically recompiled guest code, not an emulator — and
 hands you a zip whose contents sit at their real SD paths.
+
+That badge is honest about its own scope: it runs the *tooling* on Linux and on
+macOS (Apple Silicon) — the one-file builder unpacking itself, the engine's
+NDJSON contract, the pinned render-stack package downloading and installing for
+real. It does not build a `.nro`, because a CI has no game dump, and it does not
+claim a full build on those platforms.
 
 ## How to use it
 
