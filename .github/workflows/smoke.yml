@@ -62,18 +62,7 @@ jobs:
         run: |
           set -eu
           bash tools/nro-engine.sh --plan > plan.out 2> plan.err || true
-          python3 - <<'PY'
-import json
-n = 0
-for i, line in enumerate(open("plan.out"), 1):
-    line = line.strip()
-    if not line:
-        continue
-    json.loads(line)
-    n += 1
-assert n >= 1, "no NDJSON at all"
-print("OK %d lines, every one parseable JSON" % n)
-PY
+          python3 -c 'import json; ls=[l for l in open("plan.out") if l.strip()]; [json.loads(l) for l in ls]; print("OK", len(ls), "lines, every one parseable JSON")'
           grep -q '"t":"stage"' plan.out
           tail -1 plan.out
 
