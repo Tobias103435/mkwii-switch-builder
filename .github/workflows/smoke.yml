@@ -1,0 +1,97 @@
+name: smoke
+
+# Wat dit bewijst: dat het gereedschap zelf op Linux en macOS draait — de one-file
+# pakt zichzelf uit, de motor spreekt NDJSON, het pakket-besluit hangt niet aan een
+# python-NAAM, en de gepinde renderstack is bereikbaar en placeert zichzelf.
+# Wat het NIET doet: er staat geen dump in deze repo, dus er wordt geen .nro
+# gebouwd. Een bouw blijft iets van de eigen machine; dit bewaakt de weg ernaartoe.
+#
+# De stappen zijn eerst lokaal nagerekend in een verse Debian (WSL) en in een
+# PATH zonder sha256sum, zodat hier geen regel staat die op een runner verbeeldt.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 6 * * 1'   # de asset-pin moet bereikbaar blijven, ook zonder wijziging
+
+permissions:
+  contents: read
+
+jobs:
+  builder:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: shell syntax - engine in bash, one-file in plain sh
+        run: |
+          set -eu
+          for f in tools/*.sh bouw-nro.command; do bash -n "$f"; done
+          sh -n templates/MKWii-Builder.command.in
+          echo "$(ls tools/*.sh | wc -l) scripts, sjabloon en instap parsen schoon"
+
+      - name: python sources compile
+        run: |
+          set -eu
+          for f in tools/*.py; do python3 -m py_compile "$f"; done
+          echo "$(ls tools/*.py | wc -l) python-bestanden"
+
+      - name: the package-vs-hours decision does not need a python name
+        run: |
+          set -eu
+          out=$(bash tools/render-deps.sh --source | head -1)
+          case "$out" in
+            https://*) echo "package source: $out" ;;
+            *) echo "unexpected answer: $out"; exit 1 ;;
+          esac
+
+      - name: the GUI finds an interpreter that actually runs
+        run: |
+          set -eu
+          p=$(bash tools/ensure-ui-env.sh 2>/dev/null)
+          test -n "$p"
+          echo "interpreter: $p"
+
+      - name: the engine speaks NDJSON (no dump here, so a fail line is allowed)
+        run: |
+          set -eu
+          bash tools/nro-engine.sh --plan > plan.out 2> plan.err || true
+          python3 - <<'PY'
+import json
+n = 0
+for i, line in enumerate(open("plan.out"), 1):
+    line = line.strip()
+    if not line:
+        continue
+    json.loads(line)
+    n += 1
+assert n >= 1, "no NDJSON at all"
+print("OK %d lines, every one parseable JSON" % n)
+PY
+          grep -q '"t":"stage"' plan.out
+          tail -1 plan.out
+
+      - name: the pinned render package is reachable and matches its pin
+        run: |
+          set -eu
+          url=$(tr -d '\r' < tools/render-deps-pins.env | sed -n 's/^MKW_RENDER_DEPS_URL="\(.*\)"$/\1/p' | head -1)
+          bytes=$(tr -d '\r' < tools/render-deps-pins.env | sed -n 's/^MKW_RENDER_DEPS_BYTES="\(.*\)"$/\1/p' | head -1)
+          code=$(curl -sIL -o "$RUNNER_TEMP/head.txt" -w '%{http_code}' "$url")
+          len=$(tr -d '\r' < "$RUNNER_TEMP/head.txt" | awk 'tolower($1)=="content-length:"{v=$2} END{print v}')
+          test "$code" = 200
+          test "$len" = "$bytes"
+          echo "asset ok: HTTP 200, $len bytes"
+
+      - name: install the render stack from that package (76 MB, real)
+        run: |
+          set -eu
+          url=$(tr -d '\r' < tools/render-deps-pins.env | sed -n 's/^MKW_RENDER_DEPS_URL="\(.*\)"$/\1/p' | head -1)
+          MKW_DEKO3D_DEPS_DIR="$RUNNER_TEMP/deps" bash tools/render-deps.sh --install "$url"
+          MKW_DEKO3D_DEPS_DIR="$RUNNER_TEMP/deps" bash tools/render-deps.sh --verify
+          MKW_DEKO3D_DEPS_DIR="$RUNNER_TEMP/deps" bash tools/render-deps.sh --status
