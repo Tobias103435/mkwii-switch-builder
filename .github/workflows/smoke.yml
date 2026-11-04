@@ -77,6 +77,12 @@ jobs:
           test "$len" = "$bytes"
           echo "asset ok: HTTP 200, $len bytes"
 
+      - name: which hash tool this platform actually has
+        run: |
+          set -eu
+          echo "sha256sum: $(command -v sha256sum || echo afwezig)"
+          echo "shasum   : $(command -v shasum || echo afwezig)"
+
       - name: install the render stack from that package (76 MB, real)
         run: |
           set -eu
