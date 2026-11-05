@@ -145,7 +145,7 @@ got_dol="$(hashfile "$EXTRACT/sys/main.dol")"
 rel="$(find "$EXTRACT" -type f -name 'StaticR.rel' | head -1)"
 got_rel=""; [ -n "$rel" ] && got_rel="$(hashfile "$rel")"
 printf '   main.dol     %s\n' "$got_dol"
-printf '   StaticR.rel  %s\n' "${got_rel:-niet gevonden}"
+printf '   StaticR.rel  %s\n' "${got_rel:-not found}"
 if [ "$got_dol" != "$want_dol" ] || [ "$got_rel" != "$want_rel" ]; then
   echo "   LET OP: dit is een andere dumprevisie dan waar de bestaande .nro op gebouwd is." >&2
   [ "$FORCE" = 1 ] || { echo "      Compileren voor deze dump: bash tools/pack-sd.sh --rebuild (~13 min)." >&2; exit 1; }
@@ -232,8 +232,8 @@ if [ "$MODE" = zip ] || [ "$MODE" = both ]; then
 fi
 
 echo
-echo "KLAAR."
-echo "   Installatie op een SD: kopieer de map switch/ (of unzip de zip) op de ROOT"
-echo "   van die SD, start hbmenu, kies WiiCompiled-Switch."
-echo "   Deze console heeft die mappen al; dit is voor een andere SD of een kopie."
-echo "   Bevat Nintendo-materiaal: niet publiceren, alleen persoonlijk delen."
+echo "DONE."
+echo "   Install: copy the switch/ folder (or unzip the zip) onto the ROOT of the SD"
+echo "   card, start hbmenu and pick MKWii."
+echo "   This console already has those folders; this is for another card or a copy."
+echo "   Contains Nintendo material: do not publish it, share personally only."
