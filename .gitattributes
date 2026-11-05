@@ -4,3 +4,13 @@
 # Without this, a clone on a machine with core.autocrlf=true yields a tree whose
 # .sh files differ from the ones that were published.
 * text eol=lf
+
+# ... but "text" is a claim about every file, and since the project mark ships as a
+# JPEG that claim became false: with `* text eol=lf` git rewrites CRLF byte pairs in
+# the index, so a committed icon is no longer the bytes the builder baked. Binary
+# types are therefore excluded explicitly, and the publish guard compares the staged
+# copy against the original to catch the rest.
+*.jpg binary
+*.jpeg binary
+*.png binary
+*.gif binary

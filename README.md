@@ -1,5 +1,7 @@
 # Mario Kart Wii → Switch: native builder
 
+![MKWii project mark](assets/app-icon/mkwii-mark.jpg)
+
 [![smoke](https://github.com/Tobias103435/mkwii-switch-builder/actions/workflows/smoke.yml/badge.svg)](https://github.com/Tobias103435/mkwii-switch-builder/actions/workflows/smoke.yml)
 
 One click that turns **your own** Mario Kart Wii (PAL, `RMCP01`) dump into a

@@ -204,3 +204,30 @@ for BLOBS in "$WORK_DIR"/generated/*.S; do
   mv -f "$BLOBS.mkwtmp" "$BLOBS"
   mark "data-blobs: $(basename "$BLOBS") naar ELF-sectievorm (+ GNU-stack, LF-einden)"
 done
+
+# Het icoon dat in het product gebakken wordt, komt uit de lading zelf - niet uit een
+# handmatige kopie in de WORK_DIR. Waarom: `git archive` van de pin schrijft bij elke
+# verse extractie upstream's eigen `switch/icon.jpg` terug, dus een handmatige plaatsing
+# verdwijnt bij de volgende bouw en linkt dan een .nro met een icoon die niemand koos.
+# Vergelijken doen we op inhoud, niet op bestaan: een gelijk icoon is stil.
+APP_ICON="$WS_ROOT/assets/app-icon/mkwii-mark.jpg"
+WORK_ICON="$WORK_DIR/switch/icon.jpg"
+if [ ! -f "$APP_ICON" ]; then
+  mark "app-icoon: $APP_ICON ontbreekt, upstream's eigen icoon blijft staan"
+elif [ -f "$WORK_ICON" ] && cmp -s "$APP_ICON" "$WORK_ICON"; then
+  mark "app-icoon: staat al byte-gelijk in switch/icon.jpg"
+else
+  if [ -f "$WORK_ICON" ] && [ ! -f "$WORK_ICON.upstream" ]; then
+    cp -p "$WORK_ICON" "$WORK_ICON.upstream" || {
+      echo "Fout: upstream's icoon kon niet bewaard worden als $WORK_ICON.upstream" >&2
+      exit 1
+    }
+  fi
+  mkdir -p "$WORK_DIR/switch" || { echo "Fout: $WORK_DIR/switch aanmaken mislukte" >&2; exit 1; }
+  cp -f "$APP_ICON" "$WORK_ICON" || { echo "Fout: $WORK_ICON kon niet geschreven worden" >&2; exit 1; }
+  cmp -s "$APP_ICON" "$WORK_ICON" || {
+    echo "Fout: het app-icoon is na het kopiëren niet byte-gelijk in $WORK_ICON" >&2
+    exit 1
+  }
+  mark "app-icoon: $(wc -c < "$APP_ICON" | tr -d ' ') bytes naar switch/icon.jpg (upstream bewaard als .upstream)"
+fi
