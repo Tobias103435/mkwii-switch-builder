@@ -80,8 +80,14 @@ jobs:
           # dubbele punt opeet. Deze stap is de wacht op precies die regressie.
           winpath="${RUNNER_TEMP//\//\\}\\deps-win"
           MKW_DEKO3D_DEPS_DIR="$winpath" bash tools/render-deps.sh --install "$(tr -d '\r' < tools/render-deps-pins.env | sed -n 's/^MKW_RENDER_DEPS_URL="\(.*\)"$/\1/p' | head -1)"
-          MKW_DEKO3D_DEPS_DIR="$winpath" bash tools/render-deps.sh --status | grep -q "render stack  : package"
-          echo "OK: backslash-deps-pad geïnstalleerd en geverifieerd"
+          # géén `... | grep -q`: de runner zet pipefail aan, en grep -q sluit de
+          # pipe meteen - de schrijver krijgt dan SIGPIPE (141) en de stap "faalt"
+          # terwijl de installering net geslaagd was. Eerst vangen, dan pas toetsen.
+          status=$(MKW_DEKO3D_DEPS_DIR="$winpath" bash tools/render-deps.sh --status)
+          case "$status" in
+            *"render stack  : package"*) echo "OK: backslash-deps-pad geïnstalleerd en geverifieerd" ;;
+            *) echo "verwacht 'render stack  : package', gekregen:"; printf '%s\n' "$status"; exit 1 ;;
+          esac
 
       - name: what this job still does not prove
         run: |
