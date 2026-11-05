@@ -88,6 +88,13 @@ black-vehicles symptom. The fix here is `tools/patches/switch-cache-vfs.patch` (
 over `aurora-main/include/aurora/gfx.h`, `pipeline_cache.cpp` and
 `runtime/src/main.cpp`, 21.820 B), applied automatically by `tools/patch-workdir.sh`.
 
+**Reported upstream:** [dorPXP/driftdroid#29](https://github.com/dorPXP/driftdroid/issues/29)
+(2026-11-05) — *"[Bug] Switch: shader caches can never be created every boot recompiles
+all shaders"*. No pull request is offered there, and none will be: the author of this
+repository builds and tests, and the maintainers own the branch. What the issue gets from
+here is the measurement, the file:line evidence and a patch that is maintained to land
+cleanly.
+
 **Honest port state against their HEAD.** A `patch -p1 --dry-run --forward` of that file
 against a tree of exactly those three files at `d912de32` (measured 2026-11-05): 15 of
 the 16 hunks land — 12 of the 13 in `pipeline_cache.cpp`, with **one failing**;
