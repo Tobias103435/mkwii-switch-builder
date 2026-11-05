@@ -316,7 +316,9 @@ REUSE_SHA=""
 FP_AFTER=""
 
 build_fingerprint() {
-  local shards="${MKW_DEKO3D_WORK_DIR:-$DEPS_DIR/driftdroid}/generated/build_shards"
+  local shards icon
+  shards="${MKW_DEKO3D_WORK_DIR:-$DEPS_DIR/driftdroid}/generated/build_shards"
+  icon="${MKW_DEKO3D_WORK_DIR:-$DEPS_DIR/driftdroid}/switch/icon.jpg"
   {
     printf 'backend %s\n' "$BACKEND"
     printf 'full %s\n' "$FULL"
@@ -335,6 +337,11 @@ build_fingerprint() {
     printf 'render_mode %s\n' "$([ -f "$DEPS_DIR/.mkw-render-package" ] && echo package || echo source)"
     printf 'render_diag %s\n' "$(awk -F= '/^diagnostics=/{print $2}' "$DEPS_DIR/.mkw-render-diagnostics" 2>/dev/null || echo -)"
     printf 'render_archive %s\n' "$(stat -c '%s-%Y' "$DEPS_DIR/dawn-build-switch/src/dawn/native/libwebgpu_dawn.a" 2>/dev/null || echo none)"
+    # Het icoon en de titel worden pas in de allerlaatste stap ingebakken (elf2nro),
+    # en geen van beide zit in een git-head. Zonder dit veld zegt de motor "nothing
+    # changed, reusing" op een boom waarin zojuist een andere afbeelding is gelegd —
+    # precies de val die deze stempel al twee keer eerder dekt.
+    printf 'app_art %s\n' "$([ -f "$icon" ] && hashfile "$icon" || echo none)"
     printf 'dol %s\n' "$(hashfile "$ASSETS/main.dol")"
     printf 'rel %s\n' "$(hashfile "$ASSETS/StaticR.rel")"
     printf 'shards %s\n' "$(tree_bytes "$shards")"
