@@ -1,0 +1,19 @@
+--- a/src/dawn/native/deko3d/DeviceDeko3d.h
++++ b/src/dawn/native/deko3d/DeviceDeko3d.h
+@@ -48,7 +48,15 @@
+ // TEMP bring-up tracing (synchronous flushes, per-command logs). Off for normal runs.
+ inline constexpr bool kDeko3dTrace = false;
+ // TEMP bring-up: periodic memory report and render-pass image dumps.
+-inline constexpr bool kDeko3dDiag = true;
++// MKW builder: deliberately not a hard-coded value. Every dump round waits for the GPU
++// (dkQueueWaitIdle) and then walks about four million pixels on the CPU once every 300
++// presented frames - a visible hitch every five seconds at 60 fps, in menus and while
++// paused included, because the trigger counts frames and not seconds. A released product
++// should be quiet, so this is off unless a build asks for it with -DMKW_DEKO3D_DIAG=1.
++#ifndef MKW_DEKO3D_DIAG
++#define MKW_DEKO3D_DIAG 0
++#endif
++inline constexpr bool kDeko3dDiag = MKW_DEKO3D_DIAG != 0;
+ struct MemStats {
+     std::atomic<int64_t> bufferBytes{0}, bufferCount{0}, textureBytes{0}, textureCount{0};
+ };

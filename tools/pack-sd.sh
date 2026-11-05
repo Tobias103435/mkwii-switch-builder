@@ -168,37 +168,53 @@ echo "   $(basename "$NRO") $(filesize "$NRO") bytes"
 echo "   sha256 $nro_sha"
 
 echo "== Stap 5/5: aflevering bouwen (mode: $MODE) =="
+# Engelstalig, net als de rest van wat een ontvanger ziet (de app, de meldingen, de
+# README). En de instap heet MKWii.nro, dus dat zegt de tekst ook — een uitleg die
+# naar een andere naam wijst dan hbmenu toont, is de eerste dingen die iemand in de
+# war loopen.
 read -r -d '' NOTICE <<'TXT' || true
-Mario Kart Wii - Switch homebrew
-================================
+Mario Kart Wii for Nintendo Switch - homebrew build
+===================================================
 
-Sleep de map "switch" uit dit pakket op de ROOT van je SD-kaart (hij staat dan
-naast "atmosphere" op de SD). Start daarna hbmenu op de Switch en kies
-WiiCompiled-Switch.
+What to do
+  1. Copy the "switch" folder from this package into the ROOT of your SD card,
+     next to "atmosphere".
+  2. On the Switch, launch hbmenu and pick "MKWii".
 
-Er is geen schijfkeuze-venster: de game-data staat al uitgepakt op de juiste
-plaats, dus de app gaat direct naar Ready.
+That is all. There is no disc picker: the game data is already unpacked at
+switch/WiiCompiled/DATA, so the app boots straight to Ready.
 
-Dit pakket bevat code en bestanden die van Nintendo zijn. Het is gemaakt met een
-eigen dump van de bouwer en is uitsluitend voor persoonlijk gebruik. Publiceer,
-verkoop of deel dit pakket niet; het bouwgereedschap is wél delbaar, iedereen
-bouwt met zijn eigen dump.
+First start compiles every shader and pipeline, which takes a while and can show
+a few black vehicle models on the select screen. That is the cold cache, not a
+broken install: every start after that is faster and draws normally, because the
+caches now persist in switch/WiiCompiled/Cache.
 
-Bronnen: WiiCompiled (statische PPC->AArch64-vertaling), DriftDroid en
-WiiCompiled-Switch (runtime/aurora-integratie), aurora + Dawn + averne/libuam
-(Deko3D-renderer), triniblo/encounter nod (uitpakken).
+What you may and may not do with this
+  This folder contains code and files that belong to Nintendo. It was built from
+  one person's own game dump and is for personal use only. Do not publish, sell
+  or share this folder. The build tooling is a different thing and is shared
+  openly - everyone builds with their own dump.
+
+Credits
+  WiiCompiled (static PPC -> AArch64 recompilation), DriftDroid and
+  WiiCompiled-Switch (runtime and aurora integration), aurora with Dawn and
+  averne/libuam (Deko3D renderer), triniblo/encounter's nod (extraction).
 TXT
 
 # Eén opbouwlijst voor beide afleveringen, zodat map en zip niet kunnen verschillen.
+# De .nro krijgt in het pakket een kortere naam dan het product op de bouw-
+# machine heet: in hbmenu staat wat iemand moet kiezen, en "WiiCompiled-Switch-
+# native-deko3d" is 38 tekens waar drie van naast elkaar geen mens uitkiest.
+LAUNCH_NRO="MKWii.nro"
 SD_ARGS=(
-  --file "switch/WiiCompiled-Switch/$(basename "$NRO")" "$(hostpath "$NRO")"
+  --file "switch/WiiCompiled-Switch/$LAUNCH_NRO" "$(hostpath "$NRO")"
   --tree "switch/WiiCompiled/DATA/sys" "$(hostpath "$EXTRACT/sys")"
   --tree "switch/WiiCompiled/DATA/files" "$(hostpath "$EXTRACT/files")"
 )
 
 if [ "$MODE" = map ] || [ "$MODE" = both ]; then
   $PY "$(hostpath "$WS/tools/make-sd-dir.py")" "$(hostpath "$MAP")" "${SD_ARGS[@]}" \
-    --text "LEES-MIJ.txt" "$NOTICE"
+    --text "README.txt" "$NOTICE"
   map_files="$(find "$MAP" -type f | wc -l | tr -d ' ')"
   map_bytes="$(tree_bytes "$MAP")"
   printf '   map:  %s\n' "$MAP"
@@ -209,7 +225,7 @@ if [ "$MODE" = zip ] || [ "$MODE" = both ]; then
   mkdir -p "$(dirname "$OUT")"
   # make-sd-zip.py zorgt zelf voor de afsluitende newline van de notice.
   $PY "$(hostpath "$WS/tools/make-sd-zip.py")" "$(hostpath "$OUT")" --compress "$COMPRESS" \
-    "${SD_ARGS[@]}" --text "LEES-MIJ.txt" "$NOTICE"
+    "${SD_ARGS[@]}" --text "README.txt" "$NOTICE"
   zip_sha="$(hashfile "$OUT")"
   printf '%s  %s\n' "$zip_sha" "$(basename "$OUT")" > "$OUT.sha256"
   printf '   zip:  %s (%s bytes, sha256 %s)\n' "$OUT" "$(filesize "$OUT")" "$zip_sha"

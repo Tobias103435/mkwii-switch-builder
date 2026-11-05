@@ -12,7 +12,8 @@
 set -euo pipefail
 
 WORK_DIR=${1:?"gebruik: patch-workdir.sh <WORK_DIR>"}
-PATCH="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/tools/patches/native-deko3d-link-fixes.patch"
+WS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PATCH="$WS_ROOT/tools/patches/native-deko3d-link-fixes.patch"
 [ -d "$WORK_DIR" ] || { echo "Fout: WORK_DIR bestaat niet: $WORK_DIR" >&2; exit 1; }
 [ -f "$PATCH" ] || { echo "Fout: patch ontbreekt: $PATCH" >&2; exit 1; }
 
@@ -40,6 +41,87 @@ else
     echo "Fout: patch liep zonder fout maar de merkers kloppen niet." >&2
     exit 1
   fi
+fi
+
+# De cache-reparatie voor de console. SQLite is op Switch gebouwd met de lock-loze
+# "unix-none" VFS als standaard (devkitA64-newlib heeft geen POSIX-bestandsslot), en
+# die VFS weigert élke bestandsopening. Het gevolg is op de console gemeten, niet
+# bedacht: "running without a shader cache", elke boot opnieuw élke shader en élke
+# pipeline compileren, zwarte voertuigen op koude schermen. De patch maakt de SDL-VFS
+# — de enige die hier wél bij de SD-kaart kan — schrijfbaar en registreert hem als
+# standaard. Metingen, en de twee SQLite-valkuilen die ermee opgelost zijn (het
+# READONLY-folgt van IMMUTABLE, en de outFlags die een writing connection read-only
+# maken), staan in PROJECT-LOG.md §3 rij 55 en §11.
+CACHE_PATCH="$WS_ROOT/tools/patches/switch-cache-vfs.patch"
+CACHE_STAMP="$WORK_DIR/.mkw-cache-vfs.stamp"
+DRIFT_DIR="$WS_ROOT/WiiCompiled-Switch/third_party/DriftDroid"
+
+# Bestanden die deze patch aanraakt, gehaald uit zijn eigen @@-koppen — zo raakt de
+# lijst nooit achter op de inhoud. "b/" is de DriftDroid-werkboom, dus het voorvoegsel
+# eraf en dedupliceren.
+patch_files() {
+  sed -n 's|^+++ b/\([^ \t]\{1,\}\)[ \t].*|\1|p; s|^+++ b/\([^ \t]\{1,\}\)$|\1|p' "$CACHE_PATCH" \
+    | awk '!seen[$0]++'
+}
+
+# "Al aanwezig" op een merker CONTROLEREN IS HIER NIET VEILIG: een aangepaste patch
+# bevat die merker ook, en dan link je maanden de versie die je juist wilde vervangen.
+# Deze toets is content: de patch moet zich úít de WORK_DIR kunnen terugdraaien.
+cache_applied() {
+  patch -p1 -R --dry-run --forward -d "$WORK_DIR" < "$CACHE_PATCH" >/dev/null 2>&1
+}
+
+# Eén versie terugdraaien volstaat niet als de vorige patch ándere bestanden aanraakte
+# (gpu_cache.cpp en sqlite_utils.hpp zijn eruit, main.cpp en gfx.h erin). De stempel
+# onthoudt welke bestanden de vorige keer zijn gepatcht; die worden óók teruggezet naar
+# de pin vóórdat de nieuwe patch erop gaat.
+restore_to_pin() {
+  local f
+  for f in "$@"; do
+    [ -n "$f" ] || continue
+    [ -d "$DRIFT_DIR/.git" ] || [ -f "$DRIFT_DIR/.git" ] || {
+      echo "Fout: $WORK_DIR bevat een oudere cache-patch en $DRIFT_DIR is geen git-clone, dus $f kan niet naar de pin terug. Herstel de submodule (git -C WiiCompiled-Switch submodule update --init --recursive) of draai een volledige bouw." >&2
+      return 1
+    }
+    git -C "$DRIFT_DIR" show "HEAD:$f" > "$WORK_DIR/$f.mkwtmp" || {
+      echo "Fout: $f staat niet in de gepinde commit van $DRIFT_DIR" >&2
+      return 1
+    }
+    mv -f "$WORK_DIR/$f.mkwtmp" "$WORK_DIR/$f"
+  done
+}
+
+if [ ! -f "$CACHE_PATCH" ]; then
+  echo "Fout: de cache-patch ontbreekt: $CACHE_PATCH" >&2
+  exit 1
+elif cache_applied; then
+  mark "cache-vfs: deze versie van de patch staat al in de WORK_DIR, overslaan"
+else
+  PREVIOUS=""
+  [ -f "$CACHE_STAMP" ] && PREVIOUS=$(tr -d '\r' < "$CACHE_STAMP")
+  if [ -n "$PREVIOUS" ]; then
+    # Een eerdere, weer andere versie (haar stempel leeft nog, terugdraaien van de
+    # huidige lukt niet): zet eerst alle bestanden van toen én van nu terug naar de
+    # pin, zodat er geen resten van de vorige versie in de Work_dir achterblijven.
+    mark "cache-vfs: andere versie aangetroffen — bestanden opnieuw uit de pin"
+    restore_to_pin $PREVIOUS $(patch_files) || exit 1
+  fi
+  echo "   cache-vfs: toepassen op $WORK_DIR"
+  if ! patch -p1 -N --forward -d "$WORK_DIR" < "$CACHE_PATCH"; then
+    echo "Fout: switch-cache-vfs.patch past niet meer op $WORK_DIR — upstream (pin 8b33d310) wijzigde een van zijn bestanden. Kijk met 'git diff' in third_party/DriftDroid naar wat er verschoven is en maak de patch opnieuw tegen die pin." >&2
+    exit 1
+  fi
+  cache_applied || {
+    echo "Fout: cache-vfs-patch liep zonder fout maar staat niet byte-gelijk in $WORK_DIR." >&2
+    exit 1
+  }
+  # De stempel onthoudt welke bestanden nu gepatcht zijn, zodat een volgende, weer
+  # andere versie juist díe terugzet naar de pin vóórdat hij zich schrijft.
+  patch_files > "$CACHE_STAMP" || {
+    echo "Fout: cache-stempel kon niet geschreven worden: $CACHE_STAMP" >&2
+    exit 1
+  }
+  mark "cache-vfs: toegepast en teruglees-controle geslaagd"
 fi
 
 # Compilercache: de devkitA64-toolchain schrijft de compiler absouut voor

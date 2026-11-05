@@ -326,10 +326,25 @@ build_fingerprint() {
     printf 'driftdroid %s\n' "$(git -C "$REPO/third_party/DriftDroid" rev-parse HEAD 2>/dev/null || echo none)"
     printf 'dawn %s\n' "$(git -C "$DEPS_DIR/dawn" rev-parse HEAD 2>/dev/null || echo none)"
     printf 'uam %s\n' "$(git -C "$DEPS_DIR/uam" rev-parse HEAD 2>/dev/null || echo none)"
+    # De git-heads van dawn/uam say niets over de archive die we echt linken: een
+    # pakketwissel (brontoestand -> kant-en-klaar) of een stil/luid-verschil van
+    # 536 bytes liet de stempel gelijk, en dan "reuse" de motor het oude product in
+    # plaats van het nieuwe te bouwen. Grootte+mtime is hier voldoende en gratis;
+    # een herbouw verandert allebei, en de modus en de diagnostiek-markering erbij
+    # maken een wissel tussen gelijk-grote stacks ook zichtbaar.
+    printf 'render_mode %s\n' "$([ -f "$DEPS_DIR/.mkw-render-package" ] && echo package || echo source)"
+    printf 'render_diag %s\n' "$(awk -F= '/^diagnostics=/{print $2}' "$DEPS_DIR/.mkw-render-diagnostics" 2>/dev/null || echo -)"
+    printf 'render_archive %s\n' "$(stat -c '%s-%Y' "$DEPS_DIR/dawn-build-switch/src/dawn/native/libwebgpu_dawn.a" 2>/dev/null || echo none)"
     printf 'dol %s\n' "$(hashfile "$ASSETS/main.dol")"
     printf 'rel %s\n' "$(hashfile "$ASSETS/StaticR.rel")"
     printf 'shards %s\n' "$(tree_bytes "$shards")"
-    printf 'tooling %s\n' "$(cat "$WS/tools/build-in-container.sh" 2>/dev/null | hashstdin)"
+    # De gereedschappen die de bron van het product *maken*, niet alleen de aanroep
+    # ervan: patch-workdir.sh en elke patch daaronder schrijven in de WORK_DIR waar
+    # uit gelinkt wordt. Wie die buiten de stempel houdt, krijgt "nothing changed,
+    # reusing" op een bouw die juist net een reparatie bevat — precies wat er misging
+    # toen de cache-patch voor het eerst in de werkboom van de clone stond in plaats
+    # van hier.
+    printf 'tooling %s\n' "$(cat "$WS/tools/build-in-container.sh" "$WS/tools/patch-workdir.sh" "$WS/tools/renderer-diagnostics.sh" "$WS"/tools/patches/*.patch "$WS"/tools/patches/*.diff 2>/dev/null | hashstdin)"
   } | hashstdin
 }
 
@@ -649,6 +664,20 @@ if want src; then
         fail "upstream changed scripts/build-local-native-deko3d.sh, so the render-stack package no longer fits this clone. Build the stack here instead: --deps-build (needs meson, bison, flex: bash tools/setup-native.sh --install --render)"
       fi
     fi
+    # Naam en plaatje van de app. De clone heet zijn product "WiiCompiled-Switch
+    # Native Deko3D" en geeft geen icoon mee; in hbmenu is dat een regel van 38
+    # tekens zonder beeld. Wat wij afleveren heet MKWii.nro, dus de ingebouwde
+    # titel en het icoon volgen die naam - anders wijst de lijst naar de ene naam
+    # en het infopanel naar de andere.
+    if [ "$BACKEND" = native ] && [ "$PLAN_ONLY" != 1 ] &&
+       ! grep -q "nro_icon" "$REPO/scripts/build-local-native-deko3d.sh" 2>/dev/null; then
+      if git -C "$REPO" apply --check "$WS/tools/patches/app-title-and-icon.diff" 2>/dev/null &&
+         git -C "$REPO" apply "$WS/tools/patches/app-title-and-icon.diff" 2>/dev/null; then
+        stage src ok "app title and icon patched into the clone"
+      else
+        fail "upstream changed the nacptool/elf2nro block in scripts/build-local-native-deko3d.sh, so the title-and-icon patch no longer fits. Repair tools/patches/app-title-and-icon.diff against this clone; the build itself does not depend on it."
+      fi
+    fi
   fi
 fi
 
@@ -810,8 +839,27 @@ if want deliver; then
     # voor de gepinde revisie is (anders hoort er andere data bij).
     if [ "$DO_MAP" = 1 ] && [ -d "$MAP_OUT/switch/WiiCompiled/DATA/files" ] && [ "$ALLOW_MISMATCH" != 1 ]; then
       stage deliver start "refreshing the .nro in the drag-and-drop SD folder ($MAP_OUT)"
-      cp -f "$NRO" "$MAP_OUT/switch/WiiCompiled-Switch/$(basename "$NRO")" \
-        || fail "cannot copy the .nro into $MAP_OUT"
+      # Dezelfde instapnaam als pack-sd.sh gebruikt: wat in de map staat is wat
+      # hbmenu toont, en twee .nro's naast elkaar (oud-lang + nieuw-kort) is precies
+      # de lijst waar iemand niet uit kiest.
+      map_dir="$MAP_OUT/switch/WiiCompiled-Switch"
+      map_nro="$map_dir/MKWii.nro"
+      for stale in "$map_dir"/*.nro; do
+        [ -e "$stale" ] || continue
+        [ "$stale" = "$map_nro" ] && continue
+        # Dit is onze eigen, te allen tijde opnieuw te bouwen aflevermap op deze
+        # pc - nooit een SD-kaart. De harde link raakt de kaart niet.
+        rm -f "$stale" && printf '%s\n' "$(j deliver note "removed the old launch name from the local SD folder: $(basename "$stale")")"
+      done
+      if [ -e "$map_nro" ] && [ "$map_nro" -ef "$NRO" ]; then
+        # make-sd-dir.py linkt hard in plaats van te kopiëren (2,6 GB game-data), dus dit
+        # adres is hetzelfde bestand als het product: de map is per definitie al actueel en
+        # `cp` weigert terecht met "are the same file". Pas als de link verbroken is (of het
+        # bestand ontbreekt) is een echte kopie nodig.
+        stage deliver ok "SD folder already current (the .nro there is this build, via hardlink)"
+      else
+        mkdir -p "$map_dir" && cp -f "$NRO" "$map_nro" || fail "cannot copy the .nro into $MAP_OUT"
+      fi
       files="$(find "$MAP_OUT" -type f | wc -l | tr -d ' ')"
       bytes="$(tree_bytes "$MAP_OUT")"
       printf '%s\n' "$(j deliver map "$MAP_OUT" files "$files" bytes "$bytes")"
@@ -841,9 +889,12 @@ if want deliver; then
   fi
   if [ "$DO_DEPLOY" = 1 ]; then
     stage deliver start "pushing to the console over FTP"
-    bash "$WS/switch-ops/switch.sh" push "$NRO" >"$WS/logs/engine-deploy.log" 2>&1 \
+    # Niet de upstream-bestandsnaam op de kaart zetten: die is 38 tekens lang en hbmenu
+    # laat dan drie vrijwel identieke regels zien. `deploy` schrijft als MKWii.nro en
+    # legt een vorige versie als .nro.bak terzijde, dus niets wordt hier verwijderd.
+    bash "$WS/switch-ops/switch.sh" deploy "$NRO" >"$WS/logs/engine-deploy.log" 2>&1 \
       || fail "push failed (check switch-ops/switch.env and see $WS/logs/engine-deploy.log)"
-    stage deliver ok "placed on the SD card; start it from hbmenu with title override"
+    stage deliver ok "placed on the SD card as MKWii.nro; start it from hbmenu with title override"
   fi
 fi
 

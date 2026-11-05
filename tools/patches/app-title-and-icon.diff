@@ -1,0 +1,36 @@
+--- a/scripts/build-local-native-deko3d.sh
++++ b/scripts/build-local-native-deko3d.sh
+@@ -398,8 +398,12 @@
+ package_elf="$package_dir/WiiCompiled-Switch-native-deko3d.elf"
+ receipt="$OUTPUT_DIR/WiiCompiled-Switch-native-deko3d.dependencies.txt"
+ 
++# De titel die hbmenu toont (met "Title Override" aan) en op de info-panel van de
++# app staat. "WiiCompiled-Switch Native Deko3D" is een buildnaam, geen appnaam:
++# niemand zoekt die terug. Het geleverde bestand heet MKWii.nro, dus dat is ook de
++# titel — één naam, drie plekken (hbmenu-lijst, info-panel, SD-map).
+ nacptool --create \
+-    "WiiCompiled-Switch Native Deko3D" \
++    "MKWii" \
+     "WiiCompiled-Switch" \
+     "0.2.0-deko3d" \
+     "$nacp"
+@@ -411,8 +415,19 @@
+     "$strip_tool" --strip-debug "$package_elf"
+ fi
+ 
++# elf2nro wil een icoon van precies 256x256 JPEG; dat levert DriftDroid zelf mee.
++# Ontbreekt het (andere pin, latere cleanup), dan wordt het weggelaten in plaats
++# van dat de hele productbouw om een plaatje faalt.
++nro_icon=()
++if [[ -f "$WORK_DIR/switch/icon.jpg" ]]; then
++    nro_icon=(--icon="$WORK_DIR/switch/icon.jpg")
++else
++    echo "note: $WORK_DIR/switch/icon.jpg missing - the .nro ships without an icon" >&2
++fi
++
+ elf2nro "$package_elf" "$nro" \
+     --nacp="$nacp" \
++    ${nro_icon[@]+"${nro_icon[@]}"} \
+     --romfsdir="$romfs_dir"
+ 
+ sha256sum "$nro" > "$nro.sha256"

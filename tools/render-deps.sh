@@ -166,6 +166,38 @@ do_make() {
     cp -al "$DEPS_DIR/$p" "$stage/$p" 2>/dev/null || cp -R "$DEPS_DIR/$p" "$stage/$p"
   done
   cp "$RECEIPT" "$stage/native-deko3d-toolchain.receipt"
+  diag_note=""
+
+  # Deze packer is de oorsprong van het pakketontvangstbewijs, dus het attest hier
+  # moet gaan op de bytes die daadwerkelijk mee gaan — niet op de waarden die de
+  # bronboom-toestand beschrijft terwijl wij iets anders inpakken. Dat is hier van
+  # belang: met tools/build-quiet-dawn.sh ligt er een kalm Dawn-archive (zonder de
+  # frame-dumper die elke 300e frame een hapering van ~5 s kost). Zonder deze regel
+  # zou het pakket een receipt meesturen wiens archive-som niet klopt, en elke bouw
+  # ervan dan keurig afwijzen — wat de check hoort te doen.
+  #
+  # De afwijking wordt níet weggestopt: de delta zelf komt in het ontvangstbewijs te
+  # staan, met zijn eigen sha256, zodat "deze stack is gebouwd met deze patch erop"
+  # Leesbaar is in hetzelfde document dat de bron belooft.
+  diag_marker="$DEPS_DIR/.mkw-render-diagnostics"
+  if [ -f "$diag_marker" ]; then
+    cp "$diag_marker" "$stage/.mkw-render-diagnostics"
+    delta_sha="$(awk -F= '/^delta_sha256=/{print $2}' "$diag_marker")"
+    delta_file="$(awk -F= '/^delta_file=/{print $2}' "$diag_marker")"
+    [ -n "$delta_sha" ] || die "de diagnostics-marker noemt geen delta_sha256 — pak niet in wat je niet kunt verklaren"
+    [ -f "$WS/$delta_file" ] || die "de delta ontbreekt in de gereedschapsmap: $delta_file"
+    want_sha="$(sha "$stage/dawn-build-switch/src/dawn/native/libwebgpu_dawn.a")"
+    sed -i "s|^dawn_archive_sha256=.*|dawn_archive_sha256=$want_sha|" "$stage/native-deko3d-toolchain.receipt"
+    grep -q '^dawn_archive_sha256=' "$stage/native-deko3d-toolchain.receipt" || \
+      printf 'dawn_archive_sha256=%s\n' "$want_sha" >> "$stage/native-deko3d-toolchain.receipt"
+    {
+      printf 'mkw_dawn_delta_sha256=%s\n' "$delta_sha"
+      printf 'mkw_dawn_delta_file=%s\n' "$delta_file"
+      printf 'mkw_diagnostics=off\n'
+    } >> "$stage/native-deko3d-toolchain.receipt"
+    diag_note="diagnostics=off delta=$delta_file sha=${delta_sha:0:16}"
+    echo ">> packed a QUIET Dawn: delta $delta_file ($delta_sha)"
+  fi
 
   # De marker vertelt de productbouw dat deze boom uit een pakket komt. De
   # zekerheid zit niet in die tekst maar in de ontvangst: native-deko3d-
@@ -178,12 +210,17 @@ do_make() {
     echo "uam_commit=$uam8"
     echo "source_deps_dir=$DEPS_DIR"
     echo "packed_from=$(awk -F= '/^(compiler|cmake|ninja|meson|devkitpro)=/{print}' "$RECEIPT" | tr '\n' ' ')"
+    [ -z "$diag_note" ] || printf '%s\n' "$diag_note"
   } > "$stage/.mkw-render-package"
   write_licenses "$stage"
   manifest_write "$stage"
 
+  # De diagnostics-marker bestaat alleen bij een kalme stack; een vast naam in deze
+  # lijst zou elke gewone --make laten falen op "no such file".
+  pack_marker=(.mkw-render-package)
+  [ -f "$stage/.mkw-render-diagnostics" ] && pack_marker+=(.mkw-render-diagnostics)
   tar -cJf "$out" -C "$stage" \
-      .mkw-render-package MANIFEST.txt LICENSES.txt native-deko3d-toolchain.receipt \
+      "${pack_marker[@]}" MANIFEST.txt LICENSES.txt native-deko3d-toolchain.receipt \
       dawn dawn-build-switch uam LICENSES || die "packing failed"
   rm -rf "$stage"
   # Sidecar in de vorm die `sha256sum -c` verwacht: hash, twee spaties, naam.
@@ -221,7 +258,40 @@ write_pins() { # keep the pin with the package: retyping it by hand is the error
       if (!seen["MKW_RENDER_DEPS_BYTES"])  setline("MKW_RENDER_DEPS_BYTES", bytes)
     }
   ' "$PINS" > "$PINS.new" && mv -f "$PINS.new" "$PINS"
+
+  # Naam, hash en omvang zijn nu die van DIT pakket; de URL is dat niet. Die wijst
+  # nog naar wat er op github staat, en dat is een ander bestand - of geen bestand.
+  # Een pins-blok waarin dat mag botsen is de stilste manier waarop een verse
+  # machine kan falen: hij downloadt een pakket, vergeleek het met een hash van een
+  # ander, en krijgt "the package that arrived does not match its pin" - wat naar
+  # het netwerk wijst en naar de gereedschapsmap had moeten wijzen.
+  url_name="$(basename "$(read_pin MKW_RENDER_DEPS_URL)")"
+  if [ -n "$url_name" ] && [ "$url_name" != "$name" ]; then
+    awk -v n="$name" '
+      /^MKW_RENDER_DEPS_URL=/ { print "MKW_RENDER_DEPS_URL=\"\"  # set this to the hosted copy of " n " after uploading it"; next }
+      { print }
+    ' "$PINS" > "$PINS.new" && mv -f "$PINS.new" "$PINS"
+    echo ">> the pinned URL pointed at $url_name, which is not this package: URL cleared."
+    echo ">> upload $name as a release asset, then set MKW_RENDER_DEPS_URL to it, then publish the tooling."
+  fi
   echo ">> pins updated in $PINS: $digest"
+}
+
+# Eén waarheid voor wie een pakket nodig heeft: URL, naam, hash en omvang moeten
+# bij elkaar horen. Dit wordt bij elke route gecheckt, want de vier velden kunnen
+# ook met de hand uit de pas lopen.
+pins_coherent() {
+  local name url
+  name="$(read_pin MKW_RENDER_DEPS_NAME)"
+  url="$(read_pin MKW_RENDER_DEPS_URL)"
+  [ -n "$name" ] || die "no MKW_RENDER_DEPS_NAME in $PINS"
+  [ -z "$url" ] && return 0
+  if [ "$(basename "$url")" != "$name" ]; then
+    die "the render-stack pins contradict each other: URL offers $(basename "$url") while the pin names $name" \
+        "One of the two was changed without the other. Fix $PINS, or install a copy by path:" \
+        "bash tools/render-deps.sh --install dist/render-deps/$name"
+  fi
+  return 0
 }
 
 # ---- --install --------------------------------------------------------------
@@ -233,7 +303,7 @@ resolve_source() { # --install zonder argument: eerst de lokale map, dan de pinn
     printf '%s\n' "$LOCAL_SEARCH/$name"; return 0
   fi
   url="$(read_pin MKW_RENDER_DEPS_URL)"
-  if [ -n "$url" ]; then printf '%s\n' "$url"; return 0; fi
+  if [ -n "$url" ]; then pins_coherent; printf '%s\n' "$url"; return 0; fi
   if [ -d "$LOCAL_SEARCH" ]; then
     found="$(find "$LOCAL_SEARCH" -maxdepth 1 -name 'mkw-render-deko3d-*.tar.*' ! -name '*.sha256' -print -quit 2>/dev/null)"
     [ -n "$found" ] && { printf '%s\n' "$found"; return 0; }
@@ -285,8 +355,22 @@ fetch() { # fetch <bron> -> pad naar een lokaal bestand
 
 do_install() {
   local src want srcfile info
-  have_package_stack && { echo ">> render stack already present as a package in $DEPS_DIR"; return 0; }
-  have_source_stack && { echo ">> render stack already present as a source tree in $DEPS_DIR — nothing to do"; return 0; }
+  # --force: bewust ruilen van een bestaande stack. Zonder vlag is "er staat al
+  # iets" een goede reden om niets te doen; mét vlag wil iemand juist van de dure
+  # bronboom naar het kant-en-klare pakket (of omgekeerd: een pakket met een andere
+  # build, bijvoorbeeld de stille). Het oude ontvangstbewijs blijft bewaard, want
+  # wie van stack wisselt wil kunnen terug.
+  if [ "${MKW_RENDER_FORCE:-0}" = 1 ]; then
+    if [ -f "$DEPS_DIR/native-deko3d-toolchain.receipt" ]; then
+      cp -f "$DEPS_DIR/native-deko3d-toolchain.receipt" \
+            "$DEPS_DIR/native-deko3d-toolchain.receipt.before-force.bak" \
+        && echo ">> --force: oude ontvangst bewaard als native-deko3d-toolchain.receipt.before-force.bak"
+    fi
+    echo ">> --force: bestaande stack in $DEPS_DIR wordt vervangen door het pakket"
+  else
+    have_package_stack && { echo ">> render stack already present as a package in $DEPS_DIR"; return 0; }
+    have_source_stack && { echo ">> render stack already present as a source tree in $DEPS_DIR — nothing to do (use MKW_RENDER_FORCE=1 to replace it with the package)"; return 0; }
+  fi
   src="$(resolve_source "${1:-}")" ||
     die "no render-stack package found: set the url in $PINS, put the file in $LOCAL_SEARCH, or build the stack here"
   info="$(expected_sha "$src")" || info=""
@@ -327,13 +411,18 @@ do_verify() {
   # De twee archives zijn het enige wat echt gelinkt wordt. Ontbreken de
   # Deko3D-symbolen, dan zegt de bouw later alleen 'undefined reference'; die
   # teleurstelling kost weer uren, dus wordt hier naar gekeken.
+  # Wie met de portable toolchain van setup-native.sh werkt heeft geen $DEVKITPRO
+  # in de omgeving, en zou dan only this check silently skip — dus kijken we ook
+  # naar die plek. Een overgeslagen controle die er wél is, is geen controle.
   local nm="${DEVKITPRO:-}/devkitA64/bin/aarch64-none-elf-nm"
-  if [ -x "$nm" ]; then
+  local nm_alt="${MKW_TOOLCHAIN_PREFIX:-$HOME/mkw-toolchain}/opt/devkitpro/devkitA64/bin/aarch64-none-elf-nm"
+  [ -x "$nm" ] || nm="$nm_alt"
+  if [ -x "$nm" ] || [ -x "$nm.exe" ]; then
     "$nm" -C --defined-only "$DAWN_LIB" 2>/dev/null | grep -q 'dawn::native::deko3d' ||
       die "libwebgpu_dawn.a shows no dawn::native::deko3d symbols"
     echo ">> Deko3D symbols present in libwebgpu_dawn.a"
   else
-    echo ">> symbol check skipped: no aarch64-nm (DEVKITPRO not set?)"
+    echo ">> symbol check skipped: no aarch64-nm (set DEVKITPRO, or run tools/setup-native.sh --install)"
   fi
   echo ">> package is sound: $(wc -l < "$DEPS_DIR/MANIFEST.txt" | tr -d ' ') files, sha256 verified"
 }

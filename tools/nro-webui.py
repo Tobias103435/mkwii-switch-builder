@@ -434,7 +434,7 @@ def run(argv):
 def native_path(path):
     """Een POSIX-pad van de motor omzetten naar wat het besturingssysteem toont.
 
-    De motor is bash en meldt `<jouw-werkmap>/...` (of, onder een andere bash,
+    De motor is bash en meldt `/c/Users/toobh/...` (of, onder een andere bash,
     `/mnt/c/...`). Op Windows zegt `os.path.exists()` daar nee tegen en opent de
     verkenner iets anders dan de bedoeling was - dlatego de knop "Open SD folder"
     stil faalde. Eerst de eigen, voorspelbare regel voor een schijfletter, want

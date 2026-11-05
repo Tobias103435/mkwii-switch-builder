@@ -126,6 +126,17 @@ if [ "${MKW_SKIP_DEPS_CHECK:-0}" != 1 ] && [ ! -f "$DEPS_DIR/native-deko3d-toolc
   MKW_DEKO3D_DEPS_DIR="$DEPS_DIR" MKW_JOBS="$JOBS" bash scripts/prepare-native-deko3d-deps.sh
 fi
 
+# NOTE (2026-11-05): de renderer-diagnostiek van Dawn (kDeko3dDiag, elke 300e frame een
+# GPU-wacht plus een CPU-scan over ~4 miljoen pixels = een hapering per 5 s) staat AAN in
+# de gepinde upstream-patch. hem hier uitzetten kan níet: scripts/patch-dawn-switch.py
+# toetst of die patch zich volledig en byte-echt uit de Dawn-werkboom laat terugdraaien,
+# en élke wijziging — ook één regel in DeviceDeko3d.h — maakt die audit waardevol kapot.
+# De juiste plek is daarom niet deze flow maar de patch-zelf: tools/renderer-diagnostics.sh
+# zet de vlag en is expliciet aan te roepen; zodra de vlag in een eigen, gehasste
+# extra-patch achter de upstream-patch zit (met die hash in het ontvangstbewijs) wordt
+# het product stil zonder dat de audit zwijgt. Zolang dit niet zo is, is wat wij leveren
+# luidruchtig en moeten we dat op de README kunnen zeggen.
+
 # Een opruiming (sweep) of een schone machine laat geen cached vertaling achter.
 # Dat is geen fout die de gebruiker met een vlag moet kunnen oplossen: er is één
 # knop, dus de bouwer pakt zelf door naar de volledige route en zegt dat hardop.

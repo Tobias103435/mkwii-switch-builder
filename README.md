@@ -21,7 +21,8 @@ claim a full build on those platforms.
 2. Point it at your dump (`.rvz`, `.iso` or `.wbfs`) — drag and drop works.
 3. Press build. It installs the devkitA64 toolchain, fetches the prebuilt render
    stack, extracts the game data with `nod`, compiles, and packages.
-4. Unpack the resulting zip onto the SD root and start the `.nro` from hbmenu.
+4. Unpack the resulting zip onto the SD root and start `MKWii` from hbmenu — the zip
+   carries its own one-page `README.txt` about what "first boot takes a while" means.
 
 Needs about 12 GiB free and a few minutes on a normal desktop. Put the folder on the
 PC's own disk: a USB stick or an exFAT drive works too, but git refuses to work in a
@@ -59,11 +60,28 @@ texts of Dawn, Abseil and libuam inside the archive; it contains no guest code.
 
 `tools/render-deps.sh` turns that render stack — the step that used to cost hours of
 cross-compiling — into a 76 MB hash-verified download, which is attached to the
-release and pinned by name, size and sha256 in `tools/render-deps-pins.env`.
+release and pinned by name, size and sha256 in `tools/render-deps-pins.env`. That
+package is built with Dawn's Switch bring-up diagnostics compiled out; see
+`tools/build-quiet-dawn.sh` and the section on the five-second hitch in
+`README-Switch-Port.md`.
 
 ## Where this stands
 
-Verified on real hardware: a playable race (that build is `a58e4bdf…`). Known open
-defect: some vehicles render as black silhouettes. No honest FPS number yet —
-none has been measured, so none is quoted here. `README-Switch-Port.md` documents
-the pipeline, the provenance checks and the limits in detail.
+Verified on real hardware: a playable race (that build is `a58e4bdf…`). Two findings
+since then, both confirmed on the console rather than inferred from the code:
+
+- **The pipeline caches never opened at all.** SQLite on Horizon defaults to the
+  `unix-none` VFS, which refuses every open, so `Cache/*.db` stayed absent and each
+  boot recompiled all shaders. With the SDL-backed VFS registered as default, the
+  caches are written and reused (measured: 368 KB + 561 KB after a warm boot). The
+  black vehicle silhouettes belong to a genuinely cold first boot — the price of
+  compiling every shader once — and are gone from the next start.
+- **The recurring ~5 s stutter was an instrument, not the game.** Dawn's Deko3D
+  backend dumps renderer state every 300th presented frame: it waits for the GPU,
+  then walks about four million pixels on the CPU. Counting frames rather than
+  seconds is why it also happened in menus and while paused. The shipped package
+  compiles that flag out, so every frame count measured before this is contaminated
+  and no FPS number is quoted here.
+
+`README-Switch-Port.md` documents the pipeline, the provenance checks and the limits
+in detail.

@@ -15,17 +15,46 @@ AUTH=()
 [ -n "${SWITCH_FTP_USER:-}" ] && AUTH=(--user "${SWITCH_FTP_USER}:${SWITCH_FTP_PASS}")
 
 # Blokkeer elke pad die buiten onze projectmap op de SD probeert te komen.
+# Alleen de prefix vergelijken is níet genoeg: `/switch/WiiCompiled-Switch/../x` begint
+# letterlijk met de projectmap maar wijst ernaast, en die val heb ik hier zelf getest.
+# Elke `..`-component wordt daarom verworpen, ongeacht waar hij staat.
 guard() {
+  case "$1" in
+    *..*) echo "Geweigerd: '..' is geen toegestaan pad-onderdeel: $1" >&2; exit 1 ;;
+  esac
   case "$1" in
     "$DEPLOY_DIR"/*|"$DEPLOY_DIR") return 0 ;;
     *) echo "Geweigerd: $1 valt buiten $DEPLOY_DIR" >&2; exit 1 ;;
   esac
 }
 
+# De ene naam die hbmenu toont; zie het deploy-commando. Alles Olderijft als .nro.bak,
+# want hbmenu toont geen .bak en er wordt niets verwijderd.
+DEPLOY_NAME="${SWITCH_DEPLOY_NAME:-MKWii.nro}"
+
+# mv <oude naam> <nieuwe naam> — binnen DEPLOY_DIR, hernoemen, met terugleescontrole.
+do_mv() {
+  old=${1:?geef de oude naam}
+  new=${2:?geef de nieuwe naam}
+  guard "$DEPLOY_DIR/$old"; guard "$DEPLOY_DIR/$new"
+  echo ">> $old -> $new"
+  curl -sS "${AUTH[@]}" -Q "RNFR $DEPLOY_DIR/$old" -Q "RNTO $DEPLOY_DIR/$new" \
+    "$BASE$DEPLOY_DIR/" >/dev/null
+  listing=$(curl -sS "${AUTH[@]}" "$BASE$DEPLOY_DIR/")
+  printf '%s' "$listing" | grep -qF "$new" || { echo "Fout: $new staat niet op de kaart" >&2; exit 1; }
+  printf '%s' "$listing" | grep -qF "$old" && { echo "Fout: $old staat nog steeds op de kaart" >&2; exit 1; }
+  echo "   hernoemd en teruggelezen"
+}
+
 cmd=${1:-help}
 shift || true
 
 case "$cmd" in
+  mv)
+    # mv <oude remotaam> <nieuwe remotaam> — alleen BINNEN $DEPLOY_DIR, en alleen
+    # hernoemen: er bestaat geen verplaatsing naar elders en geen wiscommando.
+    do_mv "${1:?geef de oude naam}" "${2:?geef de nieuwe naam}"
+    ;;
   push)
     # push <lokaal-bestand> [remotenaam]
     local_file=$1
@@ -116,12 +145,42 @@ case "$cmd" in
       devkitpro/devkita64 bash -c \
       "nxlink -a $SWITCH_IP -p '$DEPLOY_DIR' -s '/$(basename "$nro")'"
     ;;
+  deploy)
+    # deploy <bestand.nro> — zet de kandidaat neer als HET ene bestand dat hbmenu toont:
+    # MKWii.nro. Een vorige versie blijft altijd op de kaart maar krijgt de naam
+    # archief-<sha-12>.nro.bak; die .bak-suffix haalt hem uit het hbmenu-overzicht
+    # (hbmenu toont alleen .nro) zonder iets te verwijderen. Eén lijst, één keuze, en
+    # elke eerdere hardware-run is met `switch.sh mv` weer terug te draaien.
+    nro=${1:?geef een .nro}
+    local_size=$(stat -c%s "$nro")
+    local_sha=$(sha256sum "$nro" | cut -c1-12)
+    echo ">> te plaatsen: $(basename "$nro")  $local_size B  sha $local_sha"
+    if curl -sSI "${AUTH[@]}" "$BASE$DEPLOY_DIR/$DEPLOY_NAME" >/dev/null 2>&1; then
+      curl -sS "${AUTH[@]}" -o "$HERE/pulled/.previous.nro" "$BASE$DEPLOY_DIR/$DEPLOY_NAME" \
+        || { echo "Fout: het huidige $DEPLOY_NAME is niet terug te lezen; niets overschreven" >&2; exit 1; }
+      old_sha=$(sha256sum "$HERE/pulled/.previous.nro" | cut -c1-12)
+      rm -f "$HERE/pulled/.previous.nro"
+      [ "$old_sha" = "$local_sha" ] && { echo "   $DEPLOY_NAME is al precies deze build — niets te doen"; exit 0; }
+      bak="archief-${old_sha}.nro.bak"
+      curl -sS "${AUTH[@]}" "$BASE$DEPLOY_DIR/" | grep -qF "$bak" && bak="archief-${old_sha}-$(date +%H%M%S).nro.bak"
+      echo "   huidige $DEPLOY_NAME (sha $old_sha) opzij als $bak"
+      do_mv "$DEPLOY_NAME" "$bak"
+    fi
+    echo ">> uploaden als $DEPLOY_NAME"
+    curl -sS -T "$nro" "${AUTH[@]}" "$BASE$DEPLOY_DIR/$DEPLOY_NAME"
+    remote_size=$(curl -sSI "${AUTH[@]}" "$BASE$DEPLOY_DIR/$DEPLOY_NAME" | tr -d '\r' \
+      | awk 'tolower($1)=="content-length:"{print $2}')
+    [ "$remote_size" = "$local_size" ] || { echo "Fout: kaart heeft ${remote_size:-niets} B, lokaal $local_size B" >&2; exit 1; }
+    echo "   OK: hbmenu toont vanaf nu alleen $DEPLOY_NAME ($local_size B, sha $local_sha)"
+    ;;
   *)
     cat <<'EOF'
 Gebruik:
+  switch.sh deploy <bestand.nro>                 als MKWii.nro op de kaart, vorige → archief-*.nro.bak
+  switch.sh mv <oude-naam> <nieuwe-naam>         hernoemen binnen $DEPLOY_DIR (nooit wissen)
   switch.sh push <bestand.nro> [naam.op.sd]     upload naar /switch/WiiCompiled-Switch
   switch.sh pull <rel-pad> [lokaal-bestand]     download binnen $DEPLOY_DIR
-  switch.sh pullfrom <abs-pad> <lokaal>         alleen lezen buiten $DEPLOY_DIR ( discs ), hervat automatisch
+  switch.sh pullfrom <abs-pad> <lokaal>         alleen lezen buiten $DEPLOY_DIR ( discs )
   switch.sh ls [subdir]                         directory listing
   switch.sh logs                                alle fast-track + bootstrap logs pullen
   switch.sh run <bestand.nro>                   deploy + starten via nxlink (hbmenu open)

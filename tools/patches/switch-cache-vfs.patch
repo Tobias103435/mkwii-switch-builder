@@ -1,0 +1,484 @@
+diff --git a/aurora-main/include/aurora/gfx.h b/aurora-main/include/aurora/gfx.h
+index 2a333f7..1c15901 100644
+--- a/aurora-main/include/aurora/gfx.h
++++ b/aurora-main/include/aurora/gfx.h
+@@ -78,6 +78,15 @@ void aurora_set_skip_unready_pipelines(bool enabled);
+ bool aurora_get_skip_unready_pipelines();
+ uint32_t aurora_get_queued_pipeline_count();
+ 
++// Registers the SQLite VFS that can reach this build's file system. On Switch SQLite is
++// configured with the lock-free "unix-none" VFS as its default, and that one answers every file
++// request with SQLITE_CANTOPEN — so without this call the Dawn shader cache and the pipeline
++// cache never open, and every boot recompiles every shader. Idempotent; must run before the
++// first database open in the process, which is why the runtime calls it and not aurora's
++// graphics library: the two caches live in different static archives, and the one that opens
++// first cannot reach the other.
++bool aurora_ensure_file_vfs();
++
+ // Controls whether display copies bypass the Wii's vertical copy filter.
+ void aurora_set_disable_copy_filter(bool disabled);
+ // Encode each finished frame without the renderer mutex, so the producer records the next frame
+diff --git a/aurora-main/lib/gfx/pipeline_cache.cpp b/aurora-main/lib/gfx/pipeline_cache.cpp
+index a45a57f..0f16220 100644
+--- a/aurora-main/lib/gfx/pipeline_cache.cpp
++++ b/aurora-main/lib/gfx/pipeline_cache.cpp
+@@ -7,6 +7,7 @@
+ 
+ #include <algorithm>
+ #include <atomic>
++#include <cerrno>
+ #include <chrono>
+ #include <condition_variable>
+ #include <deque>
+@@ -20,6 +21,8 @@
+ #include <sys/resource.h>
+ #endif
+ 
++#include <SDL3/SDL_error.h>
++#include <SDL3/SDL_filesystem.h>
+ #include <SDL3/SDL_iostream.h>
+ #include <absl/container/flat_hash_map.h>
+ #include <absl/container/flat_hash_set.h>
+@@ -42,6 +45,16 @@ static Module Log("aurora::gfx::pipeline_cache");
+ constexpr int PipelineCacheSchema = 1;
+ constexpr const char* InitialPipelineCacheName = "initial_pipeline_cache.db";
+ constexpr const char* SdlVfsName = "aurora_pipeline_cache_sdl_vfs";
++constexpr int SdlVfsMaxPathname = 4096;
++// SQLite is built with the lock-free "unix-none" VFS as its default on Switch, and that VFS
++// refuses every file open with SQLITE_CANTOPEN. The SDL VFS below is the only one that reaches
++// the SD card here, so on that target it also has to become the default — otherwise the Dawn and
++// pipeline caches can never be created and every boot recompiles every shader.
++#if defined(__SWITCH__)
++constexpr bool kSdlVfsBecomesDefault = true;
++#else
++constexpr bool kSdlVfsBecomesDefault = false;
++#endif
+ 
+ struct CachedPipeline {
+   wgpu::RenderPipeline pipeline;
+@@ -65,6 +78,13 @@ struct PipelineCacheWrite {
+ struct SdlVfsSqliteFile {
+   sqlite3_file base;
+   SDL_IOStream* io = nullptr;
++  bool writable = false;
++  // SQLite only hands a file object to xClose, and SQLITE_FCNTL_TEMPFILENAME needs the name back.
++  char* path = nullptr;
++  // Horizon's stdio answers a read past end-of-file with EIO, not a clean EOF, so SDL cannot be
++  // trusted to tell "short read" from "real I/O error". We track the size ourselves and answer
++  // reads past it the way the unix VFS does: fill with zero and return SQLITE_IOERR_SHORT_READ.
++  sqlite3_int64 knownSize = 0;
+ };
+ 
+ static std::mutex g_pipelineMutex;
+@@ -120,55 +140,157 @@ static sqlite3_vfs* default_vfs(sqlite3_vfs* vfs) {
+ static int sdl_vfs_close(sqlite3_file* file) {
+   auto* vfsFile = sdl_vfs_file(file);
+   if (vfsFile->io != nullptr) {
++    if (vfsFile->writable) {
++      SDL_FlushIO(vfsFile->io);
++    }
+     SDL_CloseIO(vfsFile->io);
+     vfsFile->io = nullptr;
+   }
++  SDL_free(vfsFile->path);
++  vfsFile->path = nullptr;
+   return SQLITE_OK;
+ }
+ 
++static int sdl_vfs_fail(const char* op, const SdlVfsSqliteFile* vfsFile, int code,
++                        sqlite3_int64 where, int amount);
++
+ static int sdl_vfs_read(sqlite3_file* file, void* buffer, int amount, sqlite3_int64 offset) {
+   auto* vfsFile = sdl_vfs_file(file);
+   if (vfsFile->io == nullptr || offset < 0 || amount < 0) {
+-    return SQLITE_IOERR_READ;
++    return sdl_vfs_fail("read/precondition", vfsFile, SQLITE_IOERR_READ, offset, amount);
++  }
++
++  // Een 0-byte database is voor SQLite geen fout: het leest zijn 16 change-counterbytes op
++  // offset 24 en mag dan SQLITE_IOERR_SHORT_READ zien (pager.c vult dan nullen). Op Horizon
++  // wordt zó'n lezen-voorbij-het-einde echter als EIO gerapporteerd, en diezelfde code gaat
++  // op elke andere IO-fout naar `goto failed` — precies waarom beide caches 0 bytes bleven.
++  // Daarom de grootte zelf bijhouden en voorbij EOF net doen als de unix-VFS: nullen, short read.
++  if (offset >= vfsFile->knownSize) {
++    std::memset(buffer, 0, static_cast<size_t>(amount));
++    return SQLITE_IOERR_SHORT_READ;
++  }
++  int readable = amount;
++  if (offset + amount > vfsFile->knownSize) {
++    readable = static_cast<int>(vfsFile->knownSize - offset);
+   }
++
+   if (SDL_SeekIO(vfsFile->io, offset, SDL_IO_SEEK_SET) < 0) {
+-    return SQLITE_IOERR_SEEK;
++    return sdl_vfs_fail("read/seek", vfsFile, SQLITE_IOERR_SEEK, offset, amount);
+   }
+ 
+   auto* dst = static_cast<uint8_t*>(buffer);
+   int total = 0;
+-  while (total < amount) {
+-    const size_t read = SDL_ReadIO(vfsFile->io, dst + total, static_cast<size_t>(amount - total));
++  while (total < readable) {
++    const size_t read = SDL_ReadIO(vfsFile->io, dst + total, static_cast<size_t>(readable - total));
+     if (read == 0) {
+       if (SDL_GetIOStatus(vfsFile->io) == SDL_IO_STATUS_EOF) {
+         std::memset(dst + total, 0, static_cast<size_t>(amount - total));
+         return SQLITE_IOERR_SHORT_READ;
+       }
+-      return SQLITE_IOERR_READ;
++      return sdl_vfs_fail("read/data", vfsFile, SQLITE_IOERR_READ, offset, amount);
+     }
+     if (read > static_cast<size_t>(std::numeric_limits<int>::max() - total)) {
+-      return SQLITE_IOERR_READ;
++      return sdl_vfs_fail("read/overflow", vfsFile, SQLITE_IOERR_READ, offset, amount);
+     }
+     total += static_cast<int>(read);
+   }
++  if (total < amount) {
++    std::memset(dst + total, 0, static_cast<size_t>(amount - total));
++    return SQLITE_IOERR_SHORT_READ;
++  }
+   return SQLITE_OK;
+ }
+ 
+-static int sdl_vfs_write(sqlite3_file*, const void*, int, sqlite3_int64) { return SQLITE_READONLY; }
++static int sdl_vfs_file_size(sqlite3_file* file, sqlite3_int64* size);
++
++// Eén plaats waar elke mislukte VFS-handeling zijn eigen naam, het adres en de oorzaak noemt.
++// Zonder dit zegt de console alleen "disk I/O error", en dat kan uit zes verschillende
++// methodes komen. Alleen op foutpaden, dus geen ruis in een gezonde run.
++static int sdl_vfs_fail(const char* op, const SdlVfsSqliteFile* vfsFile, int code,
++                        sqlite3_int64 where, int amount) {
++  const char* sdlError = SDL_GetError();
++  const int err = errno;
++  Log.error("sdl_vfs {}: {} ({}) at {}+{} (fd-open={}, writable={}, errno={})", op,
++            sdlError && *sdlError ? sdlError : "no SDL message", code,
++            static_cast<long long>(where), amount, vfsFile->io != nullptr, vfsFile->writable, err);
++  return code;
++}
++
++static int sdl_vfs_write(sqlite3_file* file, const void* buffer, int amount, sqlite3_int64 offset) {
++  auto* vfsFile = sdl_vfs_file(file);
++  if (vfsFile->io == nullptr || !vfsFile->writable || offset < 0 || amount < 0) {
++    return sdl_vfs_fail("write/precondition", vfsFile, SQLITE_IOERR_WRITE, offset, amount);
++  }
++  if (SDL_SeekIO(vfsFile->io, offset, SDL_IO_SEEK_SET) < 0) {
++    return sdl_vfs_fail("write/seek", vfsFile, SQLITE_IOERR_SEEK, offset, amount);
++  }
++
++  const auto* src = static_cast<const uint8_t*>(buffer);
++  int total = 0;
++  while (total < amount) {
++    const size_t written = SDL_WriteIO(vfsFile->io, src + total, static_cast<size_t>(amount - total));
++    if (written == 0) {
++      return sdl_vfs_fail("write/data", vfsFile, SQLITE_IOERR_WRITE, offset, amount);
++    }
++    if (written > static_cast<size_t>(std::numeric_limits<int>::max() - total)) {
++      return sdl_vfs_fail("write/overflow", vfsFile, SQLITE_IOERR_WRITE, offset, amount);
++    }
++    total += static_cast<int>(written);
++  }
++  // De bijgehouden grootte is wat xRead voorbij EOF afbakent; een schrijvende pager groeit
++  // het bestand door simpelweg voorbij het einde te schrijven, dus trek hem hier op.
++  if (offset + total > vfsFile->knownSize) {
++    vfsFile->knownSize = offset + total;
++  }
++  return SQLITE_OK;
++}
+ 
+-static int sdl_vfs_truncate(sqlite3_file*, sqlite3_int64) { return SQLITE_READONLY; }
++// Growing a database is a plain write past the end, which SDL (and the SD) handle; only
++// shrinking needs a truncate, and SDL3 exposes none. Nothing in the cache schema shrinks
++// under journal_mode=MEMORY, so a real request here is reported rather than silently ignored.
++static int sdl_vfs_truncate(sqlite3_file* file, sqlite3_int64 size) {
++  sqlite3_int64 current = 0;
++  if (sdl_vfs_file_size(file, &current) != SQLITE_OK) {
++    return SQLITE_IOERR_TRUNCATE;
++  }
++  if (size >= current) {
++    auto* vfsFile = sdl_vfs_file(file);
++    if (size > vfsFile->knownSize) {
++      vfsFile->knownSize = size;
++    }
++    return SQLITE_OK;
++  }
++  return sdl_vfs_fail("truncate/shrink-unsupported", sdl_vfs_file(file), SQLITE_IOERR_TRUNCATE, size,
++                      static_cast<int>(current - size));
++}
+ 
+-static int sdl_vfs_sync(sqlite3_file*, int) { return SQLITE_OK; }
++static int sdl_vfs_sync(sqlite3_file* file, int) {
++  auto* vfsFile = sdl_vfs_file(file);
++  if (vfsFile->io == nullptr) {
++    return sdl_vfs_fail("sync/no-file", vfsFile, SQLITE_IOERR, -1, 0);
++  }
++  // stdio already queues the tail; without this flush the last pages would only land at close.
++  if (vfsFile->writable && !SDL_FlushIO(vfsFile->io)) {
++    return sdl_vfs_fail("sync/flush", vfsFile, SQLITE_IOERR_WRITE, -1, 0);
++  }
++  return SQLITE_OK;
++}
+ 
+ static int sdl_vfs_file_size(sqlite3_file* file, sqlite3_int64* size) {
+   auto* vfsFile = sdl_vfs_file(file);
+   if (vfsFile->io == nullptr || size == nullptr) {
+-    return SQLITE_IOERR_FSTAT;
++    return sdl_vfs_fail("file_size/no-file", vfsFile, SQLITE_IOERR_FSTAT, -1, 0);
++  }
++  // stdio houdt de staart van een schrijvende stream in zijn buffer, en SDL's grootte
++  // komt van het bestand zelf: zonder deze spoel ziet SQLite een zojuist geschreven
++  // pagina-1 nog als een 0-byte database. Alleen voor schrijvende handvatten.
++  if (vfsFile->writable && !SDL_FlushIO(vfsFile->io)) {
++    return sdl_vfs_fail("file_size/flush", vfsFile, SQLITE_IOERR_FSTAT, -1, 0);
+   }
+ 
+   const auto ioSize = SDL_GetIOSize(vfsFile->io);
+   if (ioSize < 0) {
+-    return SQLITE_IOERR_FSTAT;
++    return sdl_vfs_fail("file_size/query", vfsFile, SQLITE_IOERR_FSTAT, -1, 0);
+   }
+   *size = static_cast<sqlite3_int64>(ioSize);
+   return SQLITE_OK;
+@@ -185,7 +307,7 @@ static int sdl_vfs_check_reserved_lock(sqlite3_file*, int* reserved) {
+   return SQLITE_OK;
+ }
+ 
+-static int sdl_vfs_file_control(sqlite3_file*, int op, void* arg) {
++static int sdl_vfs_file_control(sqlite3_file* file, int op, void* arg) {
+   switch (op) {
+   case SQLITE_FCNTL_LOCKSTATE:
+     *static_cast<int*>(arg) = SQLITE_LOCK_NONE;
+@@ -195,6 +317,18 @@ static int sdl_vfs_file_control(sqlite3_file*, int op, void* arg) {
+     return SQLITE_OK;
+   case SQLITE_FCNTL_SIZE_HINT:
+     return SQLITE_OK;
++  case SQLITE_FCNTL_TEMPFILENAME: {
++    // There is no /tmp on Horizon, so a spill has to live next to the database. journal_mode=MEMORY
++    // means this is rarely reached, but answering it keeps VACUUM from failing outright.
++    auto* vfsFile = sdl_vfs_file(file);
++    if (vfsFile->path == nullptr || arg == nullptr) {
++      return SQLITE_IOERR;
++    }
++    static std::atomic<unsigned> tempCounter{0};
++    sqlite3_snprintf(SdlVfsMaxPathname, static_cast<char*>(arg), "%s_temp_%06x", vfsFile->path,
++                     tempCounter.fetch_add(1, std::memory_order_relaxed));
++    return SQLITE_OK;
++  }
+   default:
+     return SQLITE_NOTFOUND;
+   }
+@@ -202,7 +336,13 @@ static int sdl_vfs_file_control(sqlite3_file*, int op, void* arg) {
+ 
+ static int sdl_vfs_sector_size(sqlite3_file*) { return 4096; }
+ 
+-static int sdl_vfs_device_characteristics(sqlite3_file*) {
++// IMMUTABLE is not a hint here: SQLite reads it after xOpen and turns any read-write connection
++// on such a file into a read-only one. So it may only be claimed for the files this VFS really
++// does open read-only — the bundled seed database.
++static int sdl_vfs_device_characteristics(sqlite3_file* file) {
++  if (sdl_vfs_file(file)->writable) {
++    return SQLITE_IOCAP_UNDELETABLE_WHEN_OPEN;
++  }
+   return SQLITE_IOCAP_IMMUTABLE | SQLITE_IOCAP_UNDELETABLE_WHEN_OPEN;
+ }
+ 
+@@ -226,33 +366,96 @@ static int sdl_vfs_open(sqlite3_vfs*, sqlite3_filename name, sqlite3_file* file,
+   auto* vfsFile = sdl_vfs_file(file);
+   vfsFile->base.pMethods = nullptr;
+   vfsFile->io = nullptr;
++  vfsFile->writable = false;
++  vfsFile->path = nullptr;
++  vfsFile->knownSize = 0;
+ 
+-  if (name == nullptr || (flags & SQLITE_OPEN_READWRITE) != 0 || (flags & SQLITE_OPEN_READONLY) == 0) {
++  if (name == nullptr) {
+     return SQLITE_CANTOPEN;
+   }
+ 
+-  vfsFile->io = SDL_IOFromFile(name, "rb");
+-  if (vfsFile->io == nullptr) {
++  const bool writable = (flags & SQLITE_OPEN_READWRITE) != 0;
++  if (!writable && (flags & SQLITE_OPEN_READONLY) == 0) {
+     return SQLITE_CANTOPEN;
+   }
+ 
++  // stdio has no mode that means "read-write, create if missing": "r+b" refuses a new file and
++  // "w+b" would erase an existing cache, so the file's presence picks the mode. The create branch
++  // must stay read-write — a FILE* opened "wb" cannot be read at all, and SQLite reads the header
++  // back immediately after writing page one; measured on the console, "wb" created a 0-byte cache
++  // and then failed every write with SQLITE_IOERR_READ ("disk I/O error").
++  if (writable) {
++    vfsFile->io = SDL_IOFromFile(name, "r+b");
++    if (vfsFile->io == nullptr) {
++      if ((flags & SQLITE_OPEN_CREATE) == 0) {
++        return sdl_vfs_fail("open/readwrite-missing", vfsFile, SQLITE_CANTOPEN, -1, 0);
++      }
++      vfsFile->io = SDL_IOFromFile(name, "w+b");
++    }
++    if (vfsFile->io == nullptr) {
++      return sdl_vfs_fail("open/create", vfsFile, SQLITE_CANTOPEN, -1, 0);
++    }
++    vfsFile->writable = true;
++  } else {
++    vfsFile->io = SDL_IOFromFile(name, "rb");
++    if (vfsFile->io == nullptr) {
++      return sdl_vfs_fail("open/readonly", vfsFile, SQLITE_CANTOPEN, -1, 0);
++    }
++  }
++
++  vfsFile->path = SDL_strdup(name);
++  if (vfsFile->path == nullptr) {
++    SDL_CloseIO(vfsFile->io);
++    vfsFile->io = nullptr;
++    return SQLITE_NOMEM;
++  }
++  // SQLite allocateert szOsFile ruw geheugen en roept geen constructor, dus élk veld moet
++  // hier expliciet. De begin-grootte is wat xRead later voorbij EOF afbakent.
++  const sqlite3_int64 openedSize = SDL_GetIOSize(vfsFile->io);
++  vfsFile->knownSize = openedSize > 0 ? openedSize : 0;
++
+   vfsFile->base.pMethods = &SdlVfsIoMethods;
+   if (outFlags != nullptr) {
+-    *outFlags = SQLITE_OPEN_READONLY;
++    *outFlags = writable ? (SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE) : SQLITE_OPEN_READONLY;
+   }
+   return SQLITE_OK;
+ }
+ 
+-static int sdl_vfs_delete(sqlite3_vfs*, const char*, int) { return SQLITE_READONLY; }
++static int sdl_vfs_delete(sqlite3_vfs*, const char* name, int) {
++  if (name == nullptr) {
++    return SQLITE_IOERR_DELETE;
++  }
++  return SDL_RemovePath(name) ? SQLITE_OK : SQLITE_IOERR_DELETE;
++}
+ 
+ static int sdl_vfs_access(sqlite3_vfs*, const char* name, int flags, int* result) {
+   if (result == nullptr) {
+     return SQLITE_IOERR_ACCESS;
+   }
+-  if (name == nullptr || flags == SQLITE_ACCESS_READWRITE) {
++  if (name == nullptr) {
+     *result = 0;
+     return SQLITE_OK;
+   }
++  if (flags == SQLITE_ACCESS_READWRITE) {
++    // SQLite asks this before it opens anything for writing. Two opens say more than any
++    // existence query here, and this SDL snapshot has no file-exists call worth its name:
++    // writable means writable, and a file that is not there yet counts as available — xOpen
++    // is the one that must actually create it.
++    auto* rw = SDL_IOFromFile(name, "r+b");
++    if (rw != nullptr) {
++      SDL_CloseIO(rw);
++      *result = 1;
++      return SQLITE_OK;
++    }
++    auto* ro = SDL_IOFromFile(name, "rb");
++    if (ro != nullptr) {
++      SDL_CloseIO(ro);
++      *result = 0;  // present but not writable
++      return SQLITE_OK;
++    }
++    *result = 1;
++    return SQLITE_OK;
++  }
+ 
+   auto* io = SDL_IOFromFile(name, "rb");
+   *result = io != nullptr ? 1 : 0;
+@@ -318,7 +521,7 @@ static bool register_sdl_vfs() {
+     static sqlite3_vfs sdlVfs{
+         .iVersion = 1,
+         .szOsFile = static_cast<int>(sizeof(SdlVfsSqliteFile)),
+-        .mxPathname = 4096,
++        .mxPathname = SdlVfsMaxPathname,
+         .pNext = nullptr,
+         .zName = SdlVfsName,
+         .pAppData = baseVfs,
+@@ -335,7 +538,7 @@ static bool register_sdl_vfs() {
+         .xCurrentTime = sdl_vfs_current_time,
+         .xGetLastError = sdl_vfs_get_last_error,
+     };
+-    g_sdlVfsRegisterResult = sqlite3_vfs_register(&sdlVfs, 0);
++    g_sdlVfsRegisterResult = sqlite3_vfs_register(&sdlVfs, kSdlVfsBecomesDefault ? 1 : 0);
+   });
+   return g_sdlVfsRegisterResult == SQLITE_OK;
+ }
+@@ -737,6 +940,14 @@ static bool prepare_pipeline_cache_db() {
+   }
+ 
+   const auto path = (std::filesystem::path{g_config.pipelineCachePath} / "pipeline_cache.db").string();
++  // The SD-reaching VFS is normally already registered by the runtime's startup call to
++  // aurora_ensure_file_vfs; doing it again here is idempotent and keeps this path working even if
++  // a caller reaches the pipeline cache before that startup ever runs.
++  if (!register_sdl_vfs()) {
++    Log.error("Failed to register the file VFS");
++    pipeline_cache_abort();
++    return false;
++  }
+   auto ret = sqlite3_open(path.c_str(), &g_pipelineCacheDb);
+   if (ret != SQLITE_OK) {
+     Log.error("Failed to open pipeline cache database: {}", sqlite3_errmsg(g_pipelineCacheDb));
+@@ -1387,3 +1598,5 @@ void aurora_set_skip_unready_pipelines(const bool enabled) { aurora::gfx::set_sk
+ bool aurora_get_skip_unready_pipelines() { return aurora::gfx::skip_unready_pipelines(); }
+ 
+ uint32_t aurora_get_queued_pipeline_count() { return aurora::gfx::queued_pipeline_count(); }
++
++bool aurora_ensure_file_vfs() { return aurora::gfx::register_sdl_vfs(); }
+diff --git a/runtime/src/main.cpp b/runtime/src/main.cpp
+index 155302a..9c50fd1 100644
+--- a/runtime/src/main.cpp
++++ b/runtime/src/main.cpp
+@@ -2480,6 +2480,36 @@ int RuntimeMain(int argc, char** argv) {
+         }
+         const std::string auroraUserPath = applicationDataDirectory.string();
+         const std::string auroraCachePath = rendererCacheDirectory.string();
++        // Diagonaal, en bewust vóór de eerste database-opening: puur stdio schrijven/teruglezen
++        // in deze map, zonder SQLite en zonder de SDL-VFS. Het antwoord scheidt de twee
++        // mogelijkheden: of Horizon kan hier niet schrijven (dan zit het probleem niet bij ons),
++        // of stdio kan het wél en zoekt de VFS het verkeerd. Het ftell-verschil vóór/na flush is
++        // meteen de toets op de bufferhypothese.
++        {
++            const std::string probePath = auroraCachePath + "/.mkw-stdio-probe.bin";
++            std::FILE* probe = std::fopen(probePath.c_str(), "w+b");
++            if (probe == nullptr) {
++                RT_LOG(RT_TAG_RUNTIME) << "stdio-probe: fopen FAALDE in " << auroraCachePath
++                          << ", errno " << errno << std::endl;
++            } else {
++                char page[4096];
++                std::memset(page, 0x5a, sizeof(page));
++                char back[4096];
++                const size_t wrote = std::fwrite(page, 1, sizeof(page), probe);
++                const long ftellBefore = std::ftell(probe);
++                std::fflush(probe);
++                std::fseek(probe, 0, SEEK_END);
++                const long sizeViaSeek = std::ftell(probe);
++                std::rewind(probe);
++                const size_t read = std::fread(back, 1, sizeof(back), probe);
++                const bool identical = read == wrote && std::memcmp(page, back, read) == 0;
++                RT_LOG(RT_TAG_RUNTIME) << "stdio-probe: schreef " << wrote << " B, ftell direct "
++                          << ftellBefore << " B, grootte na flush/seek " << sizeViaSeek
++                          << " B, teruggelezen " << read << " B "
++                          << (identical ? "== IDENTIEK" : "!= VERSCHIL") << ", errno " << errno << std::endl;
++                std::fclose(probe);
++            }
++        }
+         auroraConfig.userPath = auroraUserPath.c_str();
+         auroraConfig.cachePath = auroraCachePath.c_str();
+         auroraConfig.logCallback = &RuntimeAuroraLogCallback;
+@@ -2558,10 +2588,15 @@ int RuntimeMain(int argc, char** argv) {
+ #if defined(__ANDROID__) && defined(MKW_PGO_GENERATE)
+         StartAndroidPgoRecording();
+ #endif
+-
+ #if defined(__SWITCH__)
+         // Switch system fonts for the launcher and the settings panel (runs inside aurora_initialize).
+         auroraConfig.imGuiInitCallback = &SwitchLauncherInitFonts;
++        // Register the SD-reaching SQLite VFS before anything opens a database. On this target
++        // SQLite's own default VFS refuses every file, so without this the Dawn shader cache and
++        // the pipeline cache silently never load and every boot recompiles every shader.
++        if (!aurora_ensure_file_vfs()) {
++            RT_LOG(RT_TAG_RUNTIME) << "Failed to register the SQLite file VFS; caches will stay in memory";
++        }
+ #endif
+         const AuroraInfo auroraInfo = aurora_initialize(0, nullptr, &auroraConfig);
+ #if defined(ANDROID)

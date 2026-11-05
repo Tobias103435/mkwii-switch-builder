@@ -26,9 +26,35 @@ integration, glue and testing work — not porting work.
 ## What works
 
 On a modded Switch (atmosphère / homebrew, launched via hbmenu with
-**title override / full memory**) the game boots and you can race. Known issue:
-some vehicles briefly render as a black silhouette (most likely shader / pipeline
-compilation). No measured FPS comparison against Dolphin NX on the same console yet.
+**title override / full memory**) the game boots and you can race. Two things that
+used to be listed as open defects are now explained and closed on hardware: vehicles
+rendering as black silhouettes (that is a cold pipeline cache — SQLite refused to open
+one at all, see the section below) and a stutter every ~5 seconds (that was Dawn's
+frame-dumping diagnostic, now compiled out of the shipped render package). No measured
+FPS comparison against Dolphin NX on the same console yet — and none will be quoted
+from any run made while that diagnostic was still on, because it was measuring itself
+into the frame time.
+
+### The caches and the hitch (both found on the console, not in the code)
+
+- **`Cache/dawn_cache.db` and `Cache/pipeline_cache.db` could never be opened.**
+  SQLite's Horizon build keeps `SQLITE_DEFAULT_UNIX_VFS="unix-none"`, and that VFS
+  answers every open with `SQLITE_CANTOPEN`. So every boot recompiled every shader:
+  that is the black-silhouette start, not a GPU defect. The port now registers its
+  SDL-backed VFS as the default before `aurora_initialize`. Two traps on the way
+  there, both read out of the amalgamation rather than guessed: reporting
+  `SQLITE_IOCAP_IMMUTABLE` makes SQLite force the pager read-only (`sqlite3.c:63907`),
+  and read-past-EOF on Horizon returns `EIO`, while `pager.c` tolerates
+  **only** `SQLITE_IOERR_SHORT_READ` on its 16-byte change counter — so the VFS clamps
+  reads past its own known size and answers that. Caches verified on hardware: 368,640
+  B and 561,152 B written, reused on the next boot.
+- **The ~5 s hitch was `kDeko3dDiag`**, a bring-up instrument in Dawn's Deko3D backend:
+  every 300th presented frame it runs `dkQueueWaitIdle` and then reads ~4 million
+  pixels on the CPU. It counts frames, not seconds, which is why it also fired in
+  menus and while paused. `tools/build-quiet-dawn.sh` turns it into a build-time macro
+  (default off), rebuilds the archive with the same container compiler that made the
+  original, and records the delta hash in the package receipt — so the quiet bytes are
+  a property of the distributed package, not of one developer's machine.
 
 ## Legal — read before you upload anything
 
@@ -143,7 +169,7 @@ two ways on instead. It still needs your own dump.
 The one cost that *used* to sit in front of the first build was the render stack: a
 machine that had never built this before had to cross-compile Dawn and libuam for the
 Switch, and *that* took hours. It no longer does. The stack now ships as one
-hash-verified package — 76 MB, 45 files, unpacked 620 MB — which the app downloads and
+hash-verified package — 76 MB, 46 files, unpacked 620 MB — which the app downloads and
 places where the builder expects it, and the builder verifies it against this
 repository's own pins before linking (see
 [The render stack without the hours](#the-render-stack-without-the-hours)). The window
@@ -220,7 +246,7 @@ bash tools/build-nro.sh --free-cache  # cleanup that also drops the ~5 GiB build
 bash tools/build-nro.sh --plan        # show what would happen, build nothing
 bash tools/nro-engine.sh --native --deps "<map met dawn/uam>" --full   # explicit native
 bash tools/nro-engine.sh --deps-package "<pak of url>"  # build with a prebuilt render stack
-bash tools/nro-engine.sh --deps-build   # force: compile the render stack here (hours, once)
+bash tools/nro-engine.sh --deps-build   # force: compile the render stack here (unproven on Windows — see below)
 bash tools/render-deps.sh --status      # which render stack this host has, and the pin
 bash tools/render-deps.sh --make        # pack this host's stack into one verified file
 bash tools/render-deps.sh --install     # fetch it, check the pin, place it
@@ -293,12 +319,19 @@ bash tools/render-deps.sh --make    # on a machine that already built the stack
 That writes `dist/render-deps/mkw-render-deko3d-<dawn-pin>-<uam-pin>-<date>.tar.xz`
 plus a `.sha256` sidecar. It carries only what the product link actually reads —
 `dawn/include`, the generated Dawn headers, `libwebgpu_dawn.a`, `libuam.a`, the
-toolchain receipt and the licence texts of Dawn, Abseil and libuam: **45 files,
-620,296,955 B unpacked into 75,970,952 B** (xz). No source trees; those exist only to
+toolchain receipt and the licence texts of Dawn, Abseil and libuam: **46 files,
+620,296,999 B unpacked into 76,026,648 B** (xz). No source trees; those exist only to
 be compiled. `--make` writes a `MANIFEST.txt` of sha256 + byte size for every file and
 records the archive's own name, hash and size in `tools/render-deps-pins.env` — that
 file is data, never sourced as shell, and it is the pin every later install is checked
 against.
+
+The current package also carries `.mkw-render-diagnostics`, written by
+`tools/build-quiet-dawn.sh`: the frame-dump delta it applied, the sha256 and byte size
+of the archive inside, and the exact compiler that made it. `--make` recomputes
+`dawn_archive_sha256` in the staged receipt, so the package proves the quiet bytes are
+the bytes it ships — a package whose archive does not match its marker is refused on
+the host rather than discovered on the console.
 
 To ship it: put the archive on anything that serves a plain HTTPS GET and fill in
 `MKW_RENDER_DEPS_URL` in `tools/render-deps-pins.env`. A GitHub release of a
@@ -311,14 +344,14 @@ unzip ../dist/publish/MarioKartWii-Switch-builder.zip -d .
 cp -a WiiCompiled-Switch-builder/. . && rm -r WiiCompiled-Switch-builder   # tooling at the repo root
 git add -A && git commit -m "MKWii Switch builder tooling" && git remote add origin <your-repo-url>
 git push -u origin main
-gh release create v1 ../dist/render-deps/mkw-render-deko3d-13abc3bc-f8c9eef0-20261102.tar.xz
+gh release create v1 ../dist/render-deps/mkw-render-deko3d-13abc3bc-f8c9eef0-20261105.tar.xz
 ```
 
 (`cp -a`, not `mv …/*`, because the tooling archive carries a `.gitignore` and a plain
 glob leaves dotfiles behind — the repo would then show every run's `dist/` as dirty.)
 
 and then set the pin to the asset address it prints:
-`MKW_RENDER_DEPS_URL="https://github.com/<you>/<repo>/releases/download/v1/mkw-render-deko3d-13abc3bc-f8c9eef0-20261102.tar.xz"`.
+`MKW_RENDER_DEPS_URL="https://github.com/<you>/<repo>/releases/download/v1/mkw-render-deko3d-13abc3bc-f8c9eef0-20261105.tar.xz"`.
 Check it before telling anyone: `bash tools/render-deps.sh --status` should name that URL,
 and `bash tools/nro-engine.sh --plan` on a machine without the stack should answer "comes
 as a verified package". Recipients need nothing else. With no URL set, the engine looks
@@ -352,7 +385,17 @@ One caveat worth saying out loud: those archives are machine code. They were pro
 the devkitA64/GCC named in the receipt, and a recipient on a much newer or much older
 toolchain can meet an ABI error at link time. Nothing hides it — the link stage fails
 with the compiler's own words, and `--deps-build` remains the route that compiles the
-stack for whatever this machine has. The distributable rules are unchanged: the package
+stack for whatever this machine has. **That route is not proven on Windows**, and it is
+worth knowing before you rely on it: attempted there it stops in libuam's configure step,
+because `uam/meson.build` still calls `import('python3')` and
+`distutils.version.StrictVersion` — and `distutils` was removed in Python 3.12. (The same
+file also receives an MSYS-style compiler path from meson on that platform.) The package
+in this release was compiled from source inside the pinned `devkitpro/devkita64`
+container, which is where the quiet archive came from. So on Windows: take the package —
+which is the default — and treat `--deps-build` as the route that still needs its libuam
+fix upstream (`python3` → `python`, `StrictVersion` → a plain version compare) before it
+can be promised.
+The distributable rules are unchanged: the package
 is Dawn and libuam object code under their own licences (texts included) with no
 Nintendo data in it, while the `.nro` and the game data still are not shareable.
 
@@ -366,9 +409,14 @@ bash tools/pack-sd.sh --rebuild       # recompile the .nro for a different dump
 
 It checks the dump against the pins the build was made for, then writes one `.zip`
 holding the `.nro` **and** the already-extracted game data at their real SD paths
-(`switch/WiiCompiled-Switch/*.nro`, `switch/WiiCompiled/DATA/{sys,files,.import_complete}`),
+(`switch/WiiCompiled-Switch/MKWii.nro`, `switch/WiiCompiled/DATA/{sys,files,.import_complete}`),
 so whoever receives it only unpacks onto the SD root — no disc picker, no extraction on
-the console. It needs the toolchain (extract/compile) and Python (the zip), plus the
+the console. The launch file is always `MKWii.nro` — the name the builder delivers and
+the name `switch-ops/switch.sh deploy` keeps it at, rotating the previous build to
+`archief-<sha>.nro.bak` instead of deleting anything — and hbmenu shows `MKWii` with its
+own 256×256 icon rather than a hash, so "which of these five files is the current one"
+is not a question anyone has to ask on a TV. It needs the toolchain
+(extract/compile) and Python (the zip), plus the
 `.nro` you built; Docker only if you chose it as the backend. The zip is Nintendo data: keep it private, share only this script.
 
 A development log of this port exists and is kept private: it names the author's own
