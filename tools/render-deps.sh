@@ -26,7 +26,24 @@ LOCAL_SEARCH="${MKW_RENDER_DEPS_LOCAL:-$WS/dist/render-deps}"
 
 # Het deps-pad volgt dezelfde zoekvolgorde als tools/nro-engine.sh, zodat dit
 # script en de motor nooit naar twee verschillende bomen kijken.
-DEPS_DIR="${MKW_DEKO3D_DEPS_DIR:-${MKW_DEPS_DIR:-}}"
+# Eén ding doet dit script wél vóór alles: een Windows-pad met backslashes
+# normaliseren. `D:\a\_temp` + `/deps` werd in de Windows-CI `D\a\_temp/deps`
+# (msys eet de dubbele punt), en tar zag dat als een kapot pad — de download
+# was dan perfect geslaagd en het uitpakken mislukte. Zelfde normalisatie als
+# win_path() in de motor, hier gekopieerd omdat dit script losdraait.
+win_path() {
+  local p="${1:-}"
+  [ -n "$p" ] || { printf '\n'; return 0; }
+  case "$p" in
+    *\\*) if command -v cygpath >/dev/null 2>&1; then
+            p="$(cygpath -u "$p" 2>/dev/null || printf '%s' "$p")"
+          else
+            p="$(printf '%s' "$p" | tr '\\' '/')"
+          fi ;;
+  esac
+  printf '%s\n' "${p%/}"
+}
+DEPS_DIR="$(win_path "${MKW_DEKO3D_DEPS_DIR:-${MKW_DEPS_DIR:-}}")"
 if [ -z "$DEPS_DIR" ]; then
   for c in "$WS/.deps/native-deko3d" "$HOME/mkw-toolchain/deps/native-deko3d" \
            "$HOME/mkw-deps/native-deko3d" "/opt/mkw-deps/native-deko3d"; do
@@ -247,8 +264,21 @@ fetch() { # fetch <bron> -> pad naar een lokaal bestand
   out="$LOCAL_SEARCH/$(basename "$src")"
   rm -f "$out.part"
   echo ">> downloading: $src" >&2
-  curl --fail --location --retry 3 --retry-delay 2 --connect-timeout 15 -o "$out.part" "$src" >&2 \
-    || die "download failed: $src"
+  # Eén poging is hier niet genoeg. GitHub's asset-CDN gaf in de eigen Windows-CI
+  # herhaaldelijk 504 voor precies dit bestand, terwijl dezelfde URL op Linux en
+  # macOS in dezelfde run gewoon werkte - wie dan één poging doet, noemt een
+  # hoestje van de server een kapotte builder. Dus: vijf pogingen, ook op foute
+  # statuscodes en op een afwijzende connectie, plus een snelheidswacht die van
+  # een stilstaande lijn een fout maakt in plaats van een venster dat een uur
+  # hangt. Bewust géén hervatten tussen runs: een half overgeschreven .part die
+  # bij toeval door de hashcheck glipt, vergiftigt de cache voor iedereen die
+  # daarna klikt. De .part gaat weg, en de melding zegt dat opnieuw beginnen kan.
+  if ! curl --fail --location --retry 5 --retry-delay 4 --retry-all-errors \
+            --retry-connrefused --connect-timeout 15 --speed-limit 20480 --speed-time 120 \
+            -o "$out.part" "$src" >&2; then
+    rm -f "$out.part"
+    die "the download did not complete: $src — that is the network or github's file server, not this package. Nothing is lost: start the build again. To work without the internet, put the file in dist/render-deps/ or pass --deps-package <path>."
+  fi
   mv -f "$out.part" "$out"
   printf '%s\n' "$out"
 }

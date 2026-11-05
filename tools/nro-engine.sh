@@ -59,6 +59,25 @@ export "GIT_CONFIG_KEY_${GIT_CONFIG_COUNT}=safe.directory"
 export "GIT_CONFIG_VALUE_${GIT_CONFIG_COUNT}=*"
 export GIT_CONFIG_COUNT=$((GIT_CONFIG_COUNT + 1))
 
+# Een pad dat via een vlag of variabele binnenkomt, kan op Windows in twee
+# vormen bestaan: `/c/...` of `C:\...`. Die tweede is dodelijk zodra hij met een
+# slash wordt samengevoegd: msys slikt de dubbele punt op en tar krijgt
+# `D\a\_temp/deps` — gemeten in onze eigen Windows-CI, waar precies dáár het
+# uitpakken van het renderstack-pakket brak. Eén normalisatie op elke ingang
+# maakt die klasse fout onmogelijk, in plaats van hem één keer te repareren.
+win_path() {
+  local p="${1:-}"
+  [ -n "$p" ] || { printf '\n'; return 0; }
+  case "$p" in
+    *\\*) if command -v cygpath >/dev/null 2>&1; then
+            p="$(cygpath -u "$p" 2>/dev/null || printf '%s' "$p")"
+          else
+            p="$(printf '%s' "$p" | tr '\\' '/')"
+          fi ;;
+  esac
+  printf '%s\n' "${p%/}"
+}
+
 # Deps-kaart voor de native-route. De motor zoekt zelf, zodat een dubbelklik
 # zonder één vlag werkt: $MKW_DEPS_DIR wint, daarna de vaste plekken waar een
 # eerdere run of een setup-nehaalactie iets neerlegt. Een boom telt alleen als
@@ -71,7 +90,7 @@ deps_is_ready() {
     [ -f "$1/dawn-build-switch/src/dawn/native/libwebgpu_dawn.a" ] &&
     [ -f "$1/uam/build-switch/libuam.a" ]; }
 }
-HOST_DEPS="${MKW_DEPS_DIR:-}"
+HOST_DEPS="$(win_path "${MKW_DEPS_DIR:-}")"
 if [ -z "$HOST_DEPS" ]; then
   for _cand in "$WS/.deps/native-deko3d" \
                "$HOME/mkw-toolchain/deps/native-deko3d" \
@@ -177,7 +196,7 @@ while [ $# -gt 0 ]; do
     --free-cache) FREE_CACHE=1 ;;
     --docker) BACKEND=docker ;;
     --native) BACKEND=native ;;
-    --deps) HOST_DEPS="${2:?--deps needs a folder}"; shift ;;
+    --deps) HOST_DEPS="$(win_path "${2:?--deps needs a folder}")"; shift ;;
     --deps-package) RENDER_SRC="${2:?--deps-package needs a file or url}"; RENDER_WANT=package; shift ;;
     --deps-build) RENDER_WANT=build ;;
     -h|--help) awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "${BASH_SOURCE[0]}" >&2; exit 0 ;;
@@ -472,7 +491,16 @@ if want env; then
            >>"$WS/logs/render-deps.log" 2>&1; then
         stage env ok "render stack installed from the package: $DEPS_DIR (minutes, not hours)"
       else
-        fail "the render-stack package did not install — details: logs/render-deps.log"
+        # "did not install" is geen handelbare melding, en de twee oorzaken hier
+        # vragen het tegenovergestelde antwoord: de ene is een tweede klik, de
+        # andere een bestand dat niet alsnog goed wordt als je blijft proberen.
+        rwhy="check logs/render-deps.log"
+        if tr -d '\r' < "$WS/logs/render-deps.log" 2>/dev/null | grep -qiE 'did not complete|error: 50[0-9]|could not resolve|failed to connect|timed out'; then
+          rwhy="the network or github's file server hiccuped — nothing is lost, press build again"
+        elif tr -d '\r' < "$WS/logs/render-deps.log" 2>/dev/null | grep -qiE 'does not match the pin|wrong sha256|wrong size|incomplete'; then
+          rwhy="the package that arrived does not match its pin — take a fresh copy; trying again will not fix this one"
+        fi
+        fail "the render-stack package did not install. $rwhy. Without the internet this step also works: bash tools/render-deps.sh --make builds the stack here, and --deps-package <file> uses a copy you already have."
       fi
     elif native_render_probe; then
       mkdir -p "$DEPS_DIR"

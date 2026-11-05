@@ -72,6 +72,17 @@ jobs:
           MKW_DEKO3D_DEPS_DIR="$RUNNER_TEMP/deps" bash tools/render-deps.sh --install "$url"
           MKW_DEKO3D_DEPS_DIR="$RUNNER_TEMP/deps" bash tools/render-deps.sh --status
 
+      - name: a Windows-style deps path still unpacks (this is what broke first)
+        run: |
+          set -eu
+          # Eerste run van deze job: de download slaagde, het uitpakken niet -
+          # D:\a\_temp/deps kwam bij tar aan als D\a\_temp/deps omdat msys de
+          # dubbele punt opeet. Deze stap is de wacht op precies die regressie.
+          winpath="${RUNNER_TEMP//\//\\}\\deps-win"
+          MKW_DEKO3D_DEPS_DIR="$winpath" bash tools/render-deps.sh --install "$(tr -d '\r' < tools/render-deps-pins.env | sed -n 's/^MKW_RENDER_DEPS_URL="\(.*\)"$/\1/p' | head -1)"
+          MKW_DEKO3D_DEPS_DIR="$winpath" bash tools/render-deps.sh --status | grep -q "render stack  : package"
+          echo "OK: backslash-deps-pad geïnstalleerd en geverifieerd"
+
       - name: what this job still does not prove
         run: |
           echo "geen echte 532 MB devkitA64-download, geen volledige bouw (~16 min),"
