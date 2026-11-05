@@ -1,0 +1,78 @@
+name: windows-smoke
+
+# Een schone Windows-machine, zonder dat er iemand een VM hoeft te bouwen.
+# windows-latest is een verse VM per run: geen devkitA64, geen eerdere runs,
+# geen paden van mijn eigen pc. Dit is wat "werkt het op andermans pc" kostbaar
+# maakt om te raden en goedkoop om te meten.
+#
+# Het bewijst de eerste-run-logica en het pakket, niet een volledige bouw: daar
+# staat een apart, handmatig werkend plan voor (zie de last steps).
+
+on:
+  push:
+    paths:
+      - 'tools/**'
+      - '.github/workflows/windows-smoke.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  clean-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: what this machine has before anything is installed
+        run: |
+          echo "git:    $(command -v git || echo afwezig)"
+          echo "bash:   $(bash --version | head -1)"
+          echo "tar:    $(command -v tar || echo afwezig)"
+          echo "python3:$(command -v python3 || echo afwezig - en dat is precies de val die we al vonden)"
+          echo "devkitPro: ${DEVKITPRO:-niet gezet}"
+
+      - name: the shipped scripts parse under bash
+        run: |
+          set -eu
+          for f in tools/*.sh; do bash -n "$f"; done
+          echo "OK $(ls tools/*.sh | wc -l) scripts"
+
+      - name: the package decision needs no python name on PATH
+        run: |
+          set -eu
+          out=$(bash tools/render-deps.sh --source | head -1)
+          case "$out" in
+            https://*) echo "package source: $out" ;;
+            *) echo "unexpected: $out"; exit 1 ;;
+          esac
+
+      - name: the GUI finder returns an interpreter that actually runs
+        run: |
+          set -eu
+          p=$(bash tools/ensure-ui-env.sh 2>/dev/null)
+          test -n "$p"
+          echo "interpreter: $p"
+
+      - name: the engine speaks NDJSON on a machine with nothing installed
+        run: |
+          set -eu
+          bash tools/nro-engine.sh --plan > plan.out 2> plan.err || true
+          python -c 'import json; ls=[l for l in open("plan.out") if l.strip()]; [json.loads(l) for l in ls]; print("OK", len(ls), "parsebare regels")'
+          grep -q '"t":"stage"' plan.out
+          tail -1 plan.out
+
+      - name: install the render stack from the pinned package (76 MB, real)
+        run: |
+          set -eu
+          url=$(tr -d '\r' < tools/render-deps-pins.env | sed -n 's/^MKW_RENDER_DEPS_URL="\(.*\)"$/\1/p' | head -1)
+          MKW_DEKO3D_DEPS_DIR="$RUNNER_TEMP/deps" bash tools/render-deps.sh --install "$url"
+          MKW_DEKO3D_DEPS_DIR="$RUNNER_TEMP/deps" bash tools/render-deps.sh --status
+
+      - name: what this job still does not prove
+        run: |
+          echo "geen echte 532 MB devkitA64-download, geen volledige bouw (~16 min),"
+          echo "geen dubbelklik-venster. Die stappen vragen een handmatige run of een VM."
