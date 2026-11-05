@@ -54,6 +54,16 @@ the glue around it:
 - **devkitPro / devkitA64**, **CMake**, **Ninja**, **ccache** for the toolchain, and
   **DriftDroid**'s Dawn-on-console work, pinned as a reference commit in the receipt
 
+Two facts that belong up here rather than buried: this builder pins DriftDroid's
+`android-port` at `8b33d310` (2026-10-09) — that branch is 21 commits ahead as measured
+on 2026-11-05, and the pin is deliberate because every other input is pinned too — and
+the frame-dump stall described below was **fixed upstream by them** in `ce83b2cf`
+(2026-11-03); our delta makes the same change for the older pin and turns it into a
+build-time macro. What is not upstream is the writable cache VFS.
+`README-Switch-Port.md` § *Relationship to upstream* gives the line numbers, the
+reproduction steps, and our patch's honest port state against their HEAD (it does not
+yet apply cleanly).
+
 Licenses: the scripts, patches and CI glue in this repo are GPL-3.0-only, matching
 the upstream port (`LICENSE`). The compiled render-stack package ships the licence
 texts of Dawn, Abseil and libuam inside the archive; it contains no guest code.

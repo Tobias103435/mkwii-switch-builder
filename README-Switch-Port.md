@@ -56,6 +56,64 @@ into the frame time.
   original, and records the delta hash in the package receipt — so the quiet bytes are
   a property of the distributed package, not of one developer's machine.
 
+## Relationship to upstream (measured 2026-11-05)
+
+A maintainer reading this should be able to answer three questions in two minutes:
+what are you building on, is it reproducible, and what is actually yours.
+
+**What we build on.** The runtime comes from DriftDroid's `android-port` branch at
+`8b33d310` (2026-10-09), pinned by the builder. That branch has moved since: 21 commits
+ahead, top `d912de32` (2026-11-04, "play the game disc's Wii Menu banner while the game
+starts"). The main repository `yashin-sh/WiiCompiled-Switch` has not moved (`b851db9`,
+2026-10-14). We stay on the pin on purpose — every other input (Dawn, libuam, nod, the
+disc revision) is pinned too, and a moving pin makes a provenance receipt meaningless.
+
+**They fixed the frame dumper themselves, and that is worth saying first.**
+`ce83b2cf` (2026-11-03) — "Switch: turn off the deko3d bring-up diagnostics (periodic GPU
+stall every 300 frames)" — sets `kDeko3dDiag = false` in
+`aurora-main/cmake/patches/dawn-nintendo-switch-platform.patch` (line 2920). Our
+`tools/patches/dawn-diagnostics-off.diff` reaches the same quiet state for the older pin
+this builder still uses, and turns it into a build-time macro instead of a hard-coded
+value; on their current HEAD the effect is already upstream, so our delta there is
+smaller than the story above makes it sound.
+
+**What is not upstream.** A *writable* cache VFS. At their current HEAD,
+`aurora-main/lib/gfx/pipeline_cache.cpp` refuses writes by design: `sdl_vfs_open()`
+(line 230) returns `SQLITE_CANTOPEN` for any request carrying
+`SQLITE_OPEN_READWRITE`, `xWrite` (157) and `xTruncate` (159) return `SQLITE_READONLY`,
+`xDelete` (246) likewise, and the bundled seed is opened
+`SQLITE_OPEN_READONLY | SQLITE_OPEN_PRIVATECACHE` (606). So on their code the caches can
+be read but never created or updated — every boot recompiles every shader, which is the
+black-vehicles symptom. The fix here is `tools/patches/switch-cache-vfs.patch` (16 hunks
+over `aurora-main/include/aurora/gfx.h`, `pipeline_cache.cpp` and
+`runtime/src/main.cpp`, 21.820 B), applied automatically by `tools/patch-workdir.sh`.
+
+**Honest port state against their HEAD.** A `patch -p1 --dry-run --forward` of that file
+against a tree of exactly those three files at `d912de32` (measured 2026-11-05): 15 of
+the 16 hunks land — 12 of the 13 in `pipeline_cache.cpp`, with **one failing**;
+`aurora-main/include/aurora/gfx.h` lands only with fuzz 2; and the second hunk in
+`runtime/src/main.cpp` lands with fuzz 2 at a 43-line offset. The failing one is our
+export block: it expects `aurora_get_queued_pipeline_count()` to be the last function,
+and they have since inserted `aurora_is_pipeline_prewarm_active()` there. So this patch
+does not yet apply cleanly to their branch. Re-porting it is our job, and until it is
+done this page says so rather than implying the work is finished.
+
+**Reproducibility of the numbers quoted above.** The cache figures are file sizes on the
+card, not benchmarks: after a clean exit from build `5e1fa104…`,
+`sdmc:/switch/WiiCompiled/Cache/dawn_cache.db` is 368.640 B and `pipeline_cache.db`
+561.152 B; the same two files were 0 B (with `Failed to create schema table: disk I/O
+error` in `stderr.txt`) in builds `0bf292ee…`/`09b1d0f0…`, and did not exist at all
+before the VFS was registered. Both are re-measurable with any FTP server on the console.
+Per upstream's own testing rule — behaviour claims need a real-hardware run with device
+and build type — the single device behind all of this is one Switch V2 on HOS 21.1.0
+with an **overclocked CPU**. That is why this repository quotes no FPS and no
+"faster than": on an OC'd console those numbers would not be comparable to anything.
+
+**And one rule we follow from their `CONTRIBUTING.md`:** issue and PR text must be written
+by a human, not generated. So this repository deliberately ships no canned issue body,
+no template and no suggested replies for the upstream thread — the discussion there is
+the author's own words, or it does not happen.
+
 ## Legal — read before you upload anything
 
 - **NEVER publish the built `.nro`.** It contains translated MKWii code (= Nintendo
